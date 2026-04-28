@@ -1,5 +1,21 @@
-FROM scratch
+FROM registry.access.redhat.com/ubi9/go-toolset:latest as builder
+ARG IMG=registry.redhat.io/vcf-migration/vcf-migration-rhel9-operator@sha256:placeholder
+ARG ORIGINAL_IMG=registry.ci.openshift.org/origin/vcf-migration-operator:main
+WORKDIR /code
+COPY ./ ./
 
+# Fail fast if IMG was not overridden from its placeholder default.
+RUN echo "${IMG}" | grep -q '@sha256:placeholder' && \
+    { echo "ERROR: IMG contains placeholder digest; override IMG with a valid image reference."; exit 1; } || true
+
+# Replace the bundle image in the repository with the one specified by the IMG build argument.
+RUN chmod -R g+rwX ./ && find bundle -type f -exec sed -i \
+    "s|${ORIGINAL_IMG}|${IMG}|g" {} \+; \
+    grep -rq "${ORIGINAL_IMG}" bundle/ && \
+    { echo "Failed to replace image references"; exit 1; } || echo "Image references replaced" && \
+    grep -r "${IMG}" bundle/
+
+FROM scratch
 # Core bundle labels.
 LABEL operators.operatorframework.io.bundle.mediatype.v1=registry+v1
 LABEL operators.operatorframework.io.bundle.manifests.v1=manifests/
@@ -16,9 +32,10 @@ LABEL operators.operatorframework.io.test.mediatype.v1=scorecard+v1
 LABEL operators.operatorframework.io.test.config.v1=tests/scorecard/
 
 # Copy files to locations specified by labels.
-COPY bundle/manifests /manifests/
-COPY bundle/metadata /metadata/
-COPY bundle/tests/scorecard /tests/scorecard/
+COPY --from=builder --chown=1001:0 /code/bundle/manifests /manifests/
+COPY --from=builder --chown=1001:0 /code/bundle/metadata /metadata/
+COPY --from=builder --chown=1001:0 /code/bundle/tests/scorecard /tests/scorecard/
+USER 1001:0
 
 # Labels from hack/patch-bundle-dockerfile.sh
 LABEL com.redhat.component="VCF Migration Operator"
