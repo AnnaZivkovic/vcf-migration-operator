@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-05-29T23:50:08Z"
+    createdAt: "2026-05-29T23:59:27Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -228,7 +228,7 @@ spec:
                 - --health-probe-bind-address=:8081
                 command:
                 - /manager
-                image: controller:latest
+                image: registry.ci.openshift.org/origin/vcf-migration-operator:latest
                 livenessProbe:
                   httpGet:
                     path: /healthz
