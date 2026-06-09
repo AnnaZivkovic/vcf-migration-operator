@@ -1,6 +1,6 @@
 FROM registry.access.redhat.com/ubi9/go-toolset:latest as builder
-ARG IMG=registry.redhat.io/vcf-migration/vcf-migration-rhel9-operator@sha256:placeholder
-ARG ORIGINAL_IMG=registry.ci.openshift.org/origin/vcf-migration-operator:main
+ARG IMG=registry.redhat.io/vcf-migration/vcf-migration-rhel9-operator@sha256:726cdb633ea84630f806ee5c2485a07c3a0df2f7327cf74cf701a226eb55e9fc
+ARG ORIGINAL_IMG=registry.ci.openshift.org/origin/vcf-migration-operator:latest
 WORKDIR /code
 COPY ./ ./
 
@@ -9,11 +9,12 @@ RUN echo "${IMG}" | grep -q '@sha256:placeholder' && \
     { echo "ERROR: IMG contains placeholder digest; override IMG with a valid image reference."; exit 1; } || true
 
 # Replace the bundle image in the repository with the one specified by the IMG build argument.
-RUN chmod -R g+rwX ./ && find bundle -type f -exec sed -i \
+RUN cp -r bundle /tmp/bundle && \
+    find /tmp/bundle -type f -exec sed -i \
     "s|${ORIGINAL_IMG}|${IMG}|g" {} \+; \
-    grep -rq "${ORIGINAL_IMG}" bundle/ && \
+    grep -rq "${ORIGINAL_IMG}" /tmp/bundle/ && \
     { echo "Failed to replace image references"; exit 1; } || echo "Image references replaced" && \
-    grep -r "${IMG}" bundle/
+    grep -r "${IMG}" /tmp/bundle/
 
 FROM scratch
 # Core bundle labels.
@@ -32,9 +33,9 @@ LABEL operators.operatorframework.io.test.mediatype.v1=scorecard+v1
 LABEL operators.operatorframework.io.test.config.v1=tests/scorecard/
 
 # Copy files to locations specified by labels.
-COPY --from=builder --chown=1001:0 /code/bundle/manifests /manifests/
-COPY --from=builder --chown=1001:0 /code/bundle/metadata /metadata/
-COPY --from=builder --chown=1001:0 /code/bundle/tests/scorecard /tests/scorecard/
+COPY --from=builder --chown=1001:0 /tmp/bundle/manifests /manifests/
+COPY --from=builder --chown=1001:0 /tmp/bundle/metadata /metadata/
+COPY --from=builder --chown=1001:0 /tmp/bundle/tests/scorecard /tests/scorecard/
 USER 1001:0
 
 # Labels from hack/patch-bundle-dockerfile.sh

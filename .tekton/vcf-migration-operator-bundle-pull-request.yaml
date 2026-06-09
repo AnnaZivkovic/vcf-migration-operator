@@ -18,6 +18,8 @@ metadata:
   namespace: vcf-migration-operator-tenant
 spec:
   params:
+  - name: artifact-type
+    value: operatorbundle
   - name: git-url
     value: '{{source_url}}'
   - name: revision
@@ -25,9 +27,12 @@ spec:
   - name: output-image
     value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator/vcf-migration-operator-bundle-main:on-pr-{{revision}}
   - name: dockerfile
-    value: bundle.Dockerfile
+    value: bundle.konflux.Dockerfile
   - name: path-context
     value: .
+  - name: build-platforms
+    value:
+    - "linux/amd64"
   - name: image-expires-after
     value: 5d
   - name: hermetic
