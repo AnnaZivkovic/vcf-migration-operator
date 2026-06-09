@@ -1,6 +1,6 @@
 FROM registry.access.redhat.com/ubi9/go-toolset:latest as builder
 ARG IMG=registry.redhat.io/vcf-migration/vcf-migration-rhel9-operator@sha256:placeholder
-ARG ORIGINAL_IMG=registry.ci.openshift.org/origin/vcf-migration-operator:main
+ARG ORIGINAL_IMG=registry.ci.openshift.org/origin/vcf-migration-operator:latest
 WORKDIR /code
 COPY ./ ./
 
