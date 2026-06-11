@@ -41,6 +41,8 @@ spec:
     value: ""
   - name: build-source-image
     value: "true"
+  - name: build-image-index
+    value: "false"
   pipelineRef:
     name: vcf-migration-operator-bundle-pipeline
   taskRunTemplate:
