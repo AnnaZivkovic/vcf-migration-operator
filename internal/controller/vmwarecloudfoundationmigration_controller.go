@@ -454,7 +454,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 	// Step 1: Ensure target worker MachineSets exist (idempotent: create only missing ones).
 	allTargetMSExist := true
 	for i := range migration.Spec.FailureDomains {
-		msName := fmt.Sprintf("%s-worker-%s", infraID, migration.Spec.FailureDomains[i].Name)
+		msName := workerMachineSetName(infraID, migration.Spec.FailureDomains[i].Name)
 		if _, err := machineMgr.GetMachineSet(ctx, msName); err != nil {
 			allTargetMSExist = false
 			break
@@ -483,7 +483,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		createdAny := false
 		for i := range migration.Spec.FailureDomains {
 			fd := &migration.Spec.FailureDomains[i]
-			msName := fmt.Sprintf("%s-worker-%s", infraID, fd.Name)
+			msName := workerMachineSetName(infraID, fd.Name)
 			if _, err := machineMgr.GetMachineSet(ctx, msName); err == nil {
 				log.V(1).Info("worker MachineSet already exists, skipping", "name", msName)
 				continue
@@ -837,13 +837,34 @@ func failureDomainNames(fds []configv1.VSpherePlatformFailureDomainSpec) []strin
 	return names
 }
 
+// sanitizeRFC1123 converts s to a valid RFC 1123 subdomain label by lower-casing,
+// replacing non-alphanumeric characters with hyphens, collapsing runs of hyphens,
+// and trimming leading/trailing hyphens.
+func sanitizeRFC1123(s string) string {
+	s = strings.ToLower(s)
+	s = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, s)
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+	return strings.Trim(s, "-")
+}
+
+func workerMachineSetName(infraID, fdName string) string {
+	return fmt.Sprintf("%s-worker-%s", infraID, sanitizeRFC1123(fdName))
+}
+
 // checkWorkerReadiness verifies that all machines and nodes for the target worker
 // MachineSets are in a ready state. It returns true when every MachineSet's machines
 // are Running with a NodeRef and the corresponding nodes have condition Ready=True.
 func checkWorkerReadiness(ctx context.Context, machineMgr *openshift.MachineManager, fds []configv1.VSpherePlatformFailureDomainSpec, infraID string) (bool, error) {
 	log := klog.FromContext(ctx)
 	for i := range fds {
-		msName := fmt.Sprintf("%s-worker-%s", infraID, fds[i].Name)
+		msName := workerMachineSetName(infraID, fds[i].Name)
 		machinesReady, readyCount, totalCount, err := machineMgr.CheckMachinesReady(ctx, msName)
 		if err != nil {
 			return false, fmt.Errorf("checking machines for %q: %w", msName, err)
