@@ -32,6 +32,10 @@ var (
 	machineAutoscalerGVR  = schema.GroupVersionResource{Group: "autoscaling.openshift.io", Version: "v1beta1", Resource: "machineautoscalers"}
 )
 
+var platformMachineHealthChecks = map[string]bool{
+	"openshift-machine-api/machine-api-termination-handler": true,
+}
+
 var (
 	rootTagPrivileges = []string{
 		"InventoryService.Tagging.AttachTag",
@@ -264,8 +268,14 @@ func checkInterferingRolloutResources(ctx context.Context, dynamicClient dynamic
 	if err != nil {
 		return fmt.Errorf("listing machinehealthchecks: %w", err)
 	}
-	if len(mhcs) > 0 {
-		blockers = append(blockers, fmt.Sprintf("MachineHealthCheck resources: %s", strings.Join(mhcs, ", ")))
+	var userMHCs []string
+	for _, name := range mhcs {
+		if !platformMachineHealthChecks[name] {
+			userMHCs = append(userMHCs, name)
+		}
+	}
+	if len(userMHCs) > 0 {
+		blockers = append(blockers, fmt.Sprintf("MachineHealthCheck resources: %s", strings.Join(userMHCs, ", ")))
 	}
 
 	clusterAutoscalers, err := listDynamicResourceNames(ctx, dynamicClient, clusterAutoscalerGVR)
