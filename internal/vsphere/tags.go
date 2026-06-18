@@ -3,9 +3,11 @@ package vsphere
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vapi/rest"
 	"github.com/vmware/govmomi/vapi/tags"
 	"k8s.io/klog/v2"
 )
@@ -100,7 +102,14 @@ func ObjectHasTagInCategory(ctx context.Context, s *Session, categoryName string
 	log := klog.FromContext(ctx)
 
 	category, err := s.TagManager.GetCategory(ctx, categoryName)
-	if err != nil || category == nil || category.ID == "" {
+	if err != nil {
+		if rest.IsStatusError(err, http.StatusNotFound) {
+			log.V(2).Info("tag category not found, no tags to check", "category", categoryName)
+			return false, nil
+		}
+		return false, fmt.Errorf("getting tag category %q: %w", categoryName, err)
+	}
+	if category == nil || category.ID == "" {
 		log.V(2).Info("tag category not found, no tags to check", "category", categoryName)
 		return false, nil
 	}
