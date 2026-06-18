@@ -255,47 +255,84 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 			folderCreated[key] = true
 		}
 
-		// Create region and zone tags.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
-			fmt.Sprintf("Creating tags for failure domain %q", fd.Name))
-
-		regionTagID, zoneTagID, err := vsphere.CreateRegionAndZoneTags(ctx, session, fd.Region, fd.Zone)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating tags for failure domain %q: %w", fd.Name, err)
-		}
-
-		regionTagToAttach := regionTagID
-		if tagAttached[regionAttachmentKey] {
-			regionTagToAttach = ""
-		}
-		zoneTagToAttach := zoneTagID
-		if tagAttached[zoneAttachmentKey] {
-			zoneTagToAttach = ""
-		}
-		if regionTagToAttach == "" && zoneTagToAttach == "" {
-			log.V(2).Info("skipping duplicate failure domain tag attachment", "name", fd.Name, "server", fd.Server)
-			log.V(1).Info("failure domain initialized", "name", fd.Name)
-			continue
-		}
-
-		// Attach tags to datacenter and cluster.
+		// Find datacenter and cluster objects for tag checks and attachment.
 		dc, err := session.Finder.Datacenter(ctx, fd.Topology.Datacenter)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("finding datacenter %q for tag attachment: %w", fd.Topology.Datacenter, err)
+			return ctrl.Result{}, fmt.Errorf("finding datacenter %q: %w", fd.Topology.Datacenter, err)
 		}
 
 		cluster, err := session.Finder.ClusterComputeResource(ctx, fd.Topology.ComputeCluster)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("finding cluster %q for tag attachment: %w", fd.Topology.ComputeCluster, err)
+			return ctrl.Result{}, fmt.Errorf("finding cluster %q: %w", fd.Topology.ComputeCluster, err)
 		}
 
-		if err := vsphere.AttachFailureDomainTags(ctx, session, regionTagToAttach, zoneTagToAttach, dc, cluster); err != nil {
+		// Determine which tags need to be created and attached.
+		// Skip tags that were already handled in this reconciliation (dedup map)
+		// or that already exist on the target objects.
+		needRegion := !tagAttached[regionAttachmentKey]
+		needZone := !tagAttached[zoneAttachmentKey]
+
+		if needRegion {
+			hasRegion, err := vsphere.ObjectHasTagInCategory(ctx, session, vsphere.TagCategoryRegion, dc)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("checking region tags on datacenter %q: %w", fd.Topology.Datacenter, err)
+			}
+			if hasRegion {
+				log.V(1).Info("datacenter already has region tag, skipping", "datacenter", fd.Topology.Datacenter)
+				tagAttached[regionAttachmentKey] = true
+				needRegion = false
+			}
+		}
+		if needZone {
+			hasZone, err := vsphere.ObjectHasTagInCategory(ctx, session, vsphere.TagCategoryZone, cluster)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("checking zone tags on cluster %q: %w", fd.Topology.ComputeCluster, err)
+			}
+			if hasZone {
+				log.V(1).Info("cluster already has zone tag, skipping", "cluster", fd.Topology.ComputeCluster)
+				tagAttached[zoneAttachmentKey] = true
+				needZone = false
+			}
+		}
+
+		if !needRegion && !needZone {
+			log.V(1).Info("failure domain initialized", "name", fd.Name)
+			continue
+		}
+
+		// Create and attach only tags that are missing.
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+			fmt.Sprintf("Creating tags for failure domain %q", fd.Name))
+
+		var regionTagID, zoneTagID string
+		if needRegion {
+			regionCatID, err := vsphere.EnsureTagCategory(ctx, session, vsphere.TagCategoryRegion, vsphere.TagCategoryRegionDescription, "SINGLE")
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("creating region tag category for failure domain %q: %w", fd.Name, err)
+			}
+			regionTagID, err = vsphere.EnsureTag(ctx, session, regionCatID, fd.Region, fmt.Sprintf("OpenShift region %s", fd.Region))
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("creating region tag for failure domain %q: %w", fd.Name, err)
+			}
+		}
+		if needZone {
+			zoneCatID, err := vsphere.EnsureTagCategory(ctx, session, vsphere.TagCategoryZone, vsphere.TagCategoryZoneDescription, "SINGLE")
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("creating zone tag category for failure domain %q: %w", fd.Name, err)
+			}
+			zoneTagID, err = vsphere.EnsureTag(ctx, session, zoneCatID, fd.Zone, fmt.Sprintf("OpenShift zone %s", fd.Zone))
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("creating zone tag for failure domain %q: %w", fd.Name, err)
+			}
+		}
+
+		if err := vsphere.AttachFailureDomainTags(ctx, session, regionTagID, zoneTagID, dc, cluster); err != nil {
 			return ctrl.Result{}, fmt.Errorf("attaching tags for failure domain %q: %w", fd.Name, err)
 		}
-		if regionTagToAttach != "" {
+		if needRegion {
 			tagAttached[regionAttachmentKey] = true
 		}
-		if zoneTagToAttach != "" {
+		if needZone {
 			tagAttached[zoneAttachmentKey] = true
 		}
 
