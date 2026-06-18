@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,6 +31,71 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 )
+
+func TestSanitizeRFC1123(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "already valid", input: "zone-a", want: "zone-a"},
+		{name: "underscore", input: "funny_solomon", want: "funny-solomon"},
+		{name: "multiple underscores", input: "a_b_c", want: "a-b-c"},
+		{name: "uppercase", input: "Zone-A", want: "zone-a"},
+		{name: "spaces", input: "zone a", want: "zone-a"},
+		{name: "consecutive invalid chars", input: "a__b", want: "a-b"},
+		{name: "leading invalid", input: "_zone", want: "zone"},
+		{name: "trailing invalid", input: "zone_", want: "zone"},
+		{name: "mixed invalid", input: "My Zone!@#1", want: "my-zone-1"},
+		{name: "empty string", input: "", want: ""},
+		{name: "all invalid", input: "___", want: ""},
+		{name: "only hyphens", input: "---", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeRFC1123(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeRFC1123(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkerMachineSetName(t *testing.T) {
+	tests := []struct {
+		name    string
+		infraID string
+		fdName  string
+		want    string
+	}{
+		{
+			name:    "simple name",
+			infraID: "ci-op-abc-12345",
+			fdName:  "zone-a",
+			want:    "ci-op-abc-12345-worker-zone-a",
+		},
+		{
+			name:    "underscore replaced with hyphen",
+			infraID: "ci-op-abc-12345",
+			fdName:  "funny_solomon",
+			want:    "ci-op-abc-12345-worker-funny-solomon",
+		},
+		{
+			name:    "all invalid chars falls back to default",
+			infraID: "ci-op-abc-12345",
+			fdName:  "___",
+			want:    "ci-op-abc-12345-worker-default",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := workerMachineSetName(tt.infraID, tt.fdName)
+			if got != tt.want {
+				t.Errorf("workerMachineSetName(%q, %q) = %q, want %q", tt.infraID, tt.fdName, got, tt.want)
+			}
+		})
+	}
+}
 
 var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 	Context("When reconciling a resource", func() {
