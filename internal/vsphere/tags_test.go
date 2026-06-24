@@ -346,6 +346,116 @@ func TestAttachFailureDomainTags(t *testing.T) {
 	})
 }
 
+func TestObjectHasTagInCategory(t *testing.T) {
+	t.Run("rejects nil session", func(t *testing.T) {
+		_, err := ObjectHasTagInCategory(context.Background(), nil, "test-category", &object.Datacenter{})
+		if err == nil {
+			t.Fatal("ObjectHasTagInCategory succeeded, want nil session error")
+		}
+	})
+
+	t.Run("returns false when category does not exist", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			dc, err := s.Finder.DefaultDatacenter(ctx)
+			if err != nil {
+				t.Fatalf("finding default datacenter: %v", err)
+			}
+
+			has, err := ObjectHasTagInCategory(ctx, s, "nonexistent-category", dc)
+			if err != nil {
+				t.Fatalf("ObjectHasTagInCategory: %v", err)
+			}
+			if has {
+				t.Fatal("expected false for nonexistent category")
+			}
+		})
+	})
+
+	t.Run("returns false when category exists but no tags attached", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			createTestCategory(ctx, t, s, tags.Category{
+				Name:            "test-category",
+				Description:     "test",
+				Cardinality:     "SINGLE",
+				AssociableTypes: []string{datacenterType},
+			})
+			s.TagManager.CreateTag(ctx, &tags.Tag{
+				Name:       "test-tag",
+				CategoryID: "test-category",
+			})
+
+			dc, err := s.Finder.DefaultDatacenter(ctx)
+			if err != nil {
+				t.Fatalf("finding default datacenter: %v", err)
+			}
+
+			has, err := ObjectHasTagInCategory(ctx, s, "test-category", dc)
+			if err != nil {
+				t.Fatalf("ObjectHasTagInCategory: %v", err)
+			}
+			if has {
+				t.Fatal("expected false when no tags attached")
+			}
+		})
+	})
+
+	t.Run("returns true when tag from category is attached", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			regionTagID, _, err := CreateRegionAndZoneTags(ctx, s, "us-east", "us-east-1a")
+			if err != nil {
+				t.Fatalf("CreateRegionAndZoneTags: %v", err)
+			}
+
+			dc, err := s.Finder.DefaultDatacenter(ctx)
+			if err != nil {
+				t.Fatalf("finding default datacenter: %v", err)
+			}
+
+			if err := s.TagManager.AttachTag(ctx, regionTagID, dc.Reference()); err != nil {
+				t.Fatalf("AttachTag: %v", err)
+			}
+
+			has, err := ObjectHasTagInCategory(ctx, s, TagCategoryRegion, dc)
+			if err != nil {
+				t.Fatalf("ObjectHasTagInCategory: %v", err)
+			}
+			if !has {
+				t.Fatal("expected true when tag from category is attached")
+			}
+		})
+	})
+
+	t.Run("returns false for different category tag", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			regionTagID, _, err := CreateRegionAndZoneTags(ctx, s, "us-east", "us-east-1a")
+			if err != nil {
+				t.Fatalf("CreateRegionAndZoneTags: %v", err)
+			}
+
+			dc, err := s.Finder.DefaultDatacenter(ctx)
+			if err != nil {
+				t.Fatalf("finding default datacenter: %v", err)
+			}
+
+			if err := s.TagManager.AttachTag(ctx, regionTagID, dc.Reference()); err != nil {
+				t.Fatalf("AttachTag: %v", err)
+			}
+
+			has, err := ObjectHasTagInCategory(ctx, s, TagCategoryZone, dc)
+			if err != nil {
+				t.Fatalf("ObjectHasTagInCategory: %v", err)
+			}
+			if has {
+				t.Fatal("expected false when only a different category's tag is attached")
+			}
+		})
+	})
+}
+
 func createTestCategory(ctx context.Context, t *testing.T, s *Session, category tags.Category) string {
 	t.Helper()
 

@@ -3,9 +3,11 @@ package vsphere
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vapi/rest"
 	"github.com/vmware/govmomi/vapi/tags"
 	"k8s.io/klog/v2"
 )
@@ -87,6 +89,56 @@ func missingAssociableTypes(existingTypes, requiredTypes []string) []string {
 	}
 
 	return missing
+}
+
+// ObjectHasTagInCategory reports whether the given vSphere managed object
+// already has a tag from the named category attached. It is used to skip
+// tag creation and attachment when the customer (or a previous run) has
+// already set up the failure domain tags.
+func ObjectHasTagInCategory(ctx context.Context, s *Session, categoryName string, obj object.Reference) (bool, error) {
+	if s == nil || s.TagManager == nil {
+		return false, fmt.Errorf("session and TagManager must not be nil")
+	}
+	log := klog.FromContext(ctx)
+
+	category, err := s.TagManager.GetCategory(ctx, categoryName)
+	if err != nil {
+		if rest.IsStatusError(err, http.StatusNotFound) {
+			log.V(2).Info("tag category not found, no tags to check", "category", categoryName)
+			return false, nil
+		}
+		return false, fmt.Errorf("getting tag category %q: %w", categoryName, err)
+	}
+	if category == nil || category.ID == "" {
+		log.V(2).Info("tag category not found, no tags to check", "category", categoryName)
+		return false, nil
+	}
+
+	categoryTagIDs, err := s.TagManager.ListTagsForCategory(ctx, category.ID)
+	if err != nil {
+		return false, fmt.Errorf("listing tags for category %q: %w", categoryName, err)
+	}
+	if len(categoryTagIDs) == 0 {
+		return false, nil
+	}
+
+	ref := obj.Reference()
+	attachedTagIDs, err := s.TagManager.ListAttachedTags(ctx, ref)
+	if err != nil {
+		return false, fmt.Errorf("listing attached tags on %s: %w", ref, err)
+	}
+
+	categoryTagSet := make(map[string]struct{}, len(categoryTagIDs))
+	for _, id := range categoryTagIDs {
+		categoryTagSet[id] = struct{}{}
+	}
+	for _, id := range attachedTagIDs {
+		if _, ok := categoryTagSet[id]; ok {
+			log.V(2).Info("object already has tag from category", "category", categoryName, "tagID", id, "object", ref)
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // EnsureTagCategory returns the vSphere tag category ID for the given name,
