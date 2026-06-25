@@ -102,7 +102,12 @@ func (h *Handler) ServeEventsSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func watchLoop(ctx interface{ Done() <-chan struct{} }, watcher watch.Interface, sendEvent func(*corev1.Event), sendKeepAlive func()) {
+func watchLoop(
+	ctx interface{ Done() <-chan struct{} },
+	watcher watch.Interface,
+	sendEvent func(*corev1.Event),
+	sendKeepAlive func(),
+) {
 	keepAlive := time.NewTicker(30 * time.Second)
 	defer keepAlive.Stop()
 

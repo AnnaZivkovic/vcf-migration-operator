@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	contentTypeJSON = "application/json"
+	contentTypeJSON    = "application/json"
+	defaultMigrationNS = "openshift-vcf-migration"
 )
 
 // VSphereConnectRequest is the body for POST /vsphere/connect.
@@ -67,7 +68,7 @@ func (h *Handler) ServeVSphereConnect(w http.ResponseWriter, r *http.Request) {
 	if req.SecretRef != nil && req.SecretRef.Name != "" {
 		ns := req.SecretRef.Namespace
 		if ns == "" {
-			ns = "openshift-vcf-migration"
+			ns = defaultMigrationNS
 		}
 		sm := openshift.NewSecretManager(h.KubeClient)
 		var err error
@@ -93,7 +94,7 @@ func (h *Handler) ServeVSphereConnect(w http.ResponseWriter, r *http.Request) {
 	datacenters, err := vsphere.ListDatacenters(ctx, p)
 	if err != nil {
 		klog.FromContext(ctx).V(1).Info("vsphere list datacenters failed", "server", req.Server, "err", err)
-		writeJSON(w, http.StatusOK, VSphereConnectResponse{Error: err.Error()})
+		writeJSON(w, VSphereConnectResponse{Error: err.Error()})
 		return
 	}
 
@@ -102,7 +103,7 @@ func (h *Handler) ServeVSphereConnect(w http.ResponseWriter, r *http.Request) {
 	if req.CreateSecret != nil && req.CreateSecret.Name != "" && req.Username != "" && req.Password != "" {
 		ns := req.CreateSecret.Namespace
 		if ns == "" {
-			ns = "openshift-vcf-migration"
+			ns = defaultMigrationNS
 		}
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -123,10 +124,10 @@ func (h *Handler) ServeVSphereConnect(w http.ResponseWriter, r *http.Request) {
 		resp.SecretCreated = &SecretRef{Name: req.CreateSecret.Name, Namespace: ns}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, resp)
 }
 
-func (h *Handler) getSession(r *http.Request) (*vsphere.Session, string, string, int) {
+func (h *Handler) getSession(r *http.Request) (*vsphere.Session, int) {
 	ctx := r.Context()
 	server := r.URL.Query().Get("server")
 	datacenter := r.URL.Query().Get("datacenter")
@@ -136,25 +137,25 @@ func (h *Handler) getSession(r *http.Request) (*vsphere.Session, string, string,
 	secretNamespace := r.URL.Query().Get("secretNamespace")
 
 	if server == "" || datacenter == "" {
-		return nil, "", "", http.StatusBadRequest
+		return nil, http.StatusBadRequest
 	}
 
 	if secretName != "" {
 		ns := secretNamespace
 		if ns == "" {
-			ns = "openshift-vcf-migration"
+			ns = defaultMigrationNS
 		}
 		sm := openshift.NewSecretManager(h.KubeClient)
 		var err error
 		username, password, err = sm.GetVCenterCredsFromSecret(ctx, ns, secretName, server)
 		if err != nil {
 			klog.FromContext(ctx).V(1).Info("get creds from secret failed", "err", err)
-			return nil, "", "", http.StatusBadRequest
+			return nil, http.StatusBadRequest
 		}
 	}
 
 	if username == "" || password == "" {
-		return nil, "", "", http.StatusBadRequest
+		return nil, http.StatusBadRequest
 	}
 
 	p := vsphere.Params{
@@ -167,9 +168,9 @@ func (h *Handler) getSession(r *http.Request) (*vsphere.Session, string, string,
 	session, err := vsphere.GetOrCreate(ctx, p)
 	if err != nil {
 		klog.FromContext(ctx).V(1).Info("vsphere session failed", "err", err)
-		return nil, "", "", http.StatusInternalServerError
+		return nil, http.StatusInternalServerError
 	}
-	return session, server, datacenter, 0
+	return session, 0
 }
 
 func (h *Handler) ServeVSphereDatacenters(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +192,7 @@ func (h *Handler) ServeVSphereDatacenters(w http.ResponseWriter, r *http.Request
 	if secretName != "" {
 		ns := secretNamespace
 		if ns == "" {
-			ns = "openshift-vcf-migration"
+			ns = defaultMigrationNS
 		}
 		sm := openshift.NewSecretManager(h.KubeClient)
 		var err error
@@ -211,11 +212,11 @@ func (h *Handler) ServeVSphereDatacenters(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusInternalServerError, "listing datacenters: %v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"datacenters": datacenters})
+	writeJSON(w, map[string]interface{}{"datacenters": datacenters})
 }
 
 func (h *Handler) ServeVSphereClusters(w http.ResponseWriter, r *http.Request) {
-	session, _, _, status := h.getSession(r)
+	session, status := h.getSession(r)
 	if status != 0 {
 		writeJSONError(w, status, "invalid session params")
 		return
@@ -230,11 +231,11 @@ func (h *Handler) ServeVSphereClusters(w http.ResponseWriter, r *http.Request) {
 	for _, c := range list {
 		items = append(items, c.InventoryPath)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, map[string]interface{}{"items": items})
 }
 
 func (h *Handler) ServeVSphereDatastores(w http.ResponseWriter, r *http.Request) {
-	session, _, _, status := h.getSession(r)
+	session, status := h.getSession(r)
 	if status != 0 {
 		writeJSONError(w, status, "invalid session params")
 		return
@@ -249,11 +250,11 @@ func (h *Handler) ServeVSphereDatastores(w http.ResponseWriter, r *http.Request)
 	for _, d := range list {
 		items = append(items, d.InventoryPath)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, map[string]interface{}{"items": items})
 }
 
 func (h *Handler) ServeVSphereNetworks(w http.ResponseWriter, r *http.Request) {
-	session, _, _, status := h.getSession(r)
+	session, status := h.getSession(r)
 	if status != 0 {
 		writeJSONError(w, status, "invalid session params")
 		return
@@ -268,11 +269,11 @@ func (h *Handler) ServeVSphereNetworks(w http.ResponseWriter, r *http.Request) {
 	for _, n := range list {
 		items = append(items, path.Base(n.GetInventoryPath()))
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, map[string]interface{}{"items": items})
 }
 
 func (h *Handler) ServeVSphereResourcePools(w http.ResponseWriter, r *http.Request) {
-	session, _, _, status := h.getSession(r)
+	session, status := h.getSession(r)
 	if status != 0 {
 		writeJSONError(w, status, "invalid session params")
 		return
@@ -287,11 +288,11 @@ func (h *Handler) ServeVSphereResourcePools(w http.ResponseWriter, r *http.Reque
 	for _, rp := range list {
 		items = append(items, rp.InventoryPath)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, map[string]interface{}{"items": items})
 }
 
 func (h *Handler) ServeVSphereTemplates(w http.ResponseWriter, r *http.Request) {
-	session, _, _, status := h.getSession(r)
+	session, status := h.getSession(r)
 	if status != 0 {
 		writeJSONError(w, status, "invalid session params")
 		return
@@ -306,11 +307,11 @@ func (h *Handler) ServeVSphereTemplates(w http.ResponseWriter, r *http.Request) 
 	for _, vm := range list {
 		items = append(items, vm.InventoryPath)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, map[string]interface{}{"items": items})
 }
 
 func (h *Handler) ServeVSphereFolders(w http.ResponseWriter, r *http.Request) {
-	session, _, _, status := h.getSession(r)
+	session, status := h.getSession(r)
 	if status != 0 {
 		writeJSONError(w, status, "invalid session params")
 		return
@@ -328,7 +329,7 @@ func (h *Handler) ServeVSphereFolders(w http.ResponseWriter, r *http.Request) {
 	}
 	vmFolder := folders.VmFolder
 	if vmFolder == nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"items": []string{}})
+		writeJSON(w, map[string]interface{}{"items": []string{}})
 		return
 	}
 
@@ -337,7 +338,7 @@ func (h *Handler) ServeVSphereFolders(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "listing VM folders: %v", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, map[string]interface{}{"items": items})
 }
 
 // collectFolders recursively walks a VM folder tree and appends each folder's
@@ -358,10 +359,12 @@ func collectFolders(ctx context.Context, folder *object.Folder, items *[]string)
 	return nil
 }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", contentTypeJSON)
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		klog.ErrorS(err, "encoding JSON response")
+	}
 }
 
 func writeJSONError(w http.ResponseWriter, status int, format string, args ...interface{}) {

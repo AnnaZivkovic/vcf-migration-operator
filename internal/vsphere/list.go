@@ -40,7 +40,7 @@ func ListDatacenters(ctx context.Context, p Params) ([]string, error) {
 	if err := client.Login(ctx, u.User); err != nil {
 		return nil, fmt.Errorf("logging in: %w", err)
 	}
-	defer client.Logout(ctx)
+	defer func() { _ = client.Logout(ctx) }()
 
 	finder := find.NewFinder(vimClient, true)
 	dcs, err := finder.DatacenterList(ctx, "*")
