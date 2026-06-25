@@ -381,10 +381,12 @@ func TestObjectHasTagInCategory(t *testing.T) {
 				Cardinality:     "SINGLE",
 				AssociableTypes: []string{datacenterType},
 			})
-			s.TagManager.CreateTag(ctx, &tags.Tag{
+			if _, err := s.TagManager.CreateTag(ctx, &tags.Tag{
 				Name:       "test-tag",
 				CategoryID: "test-category",
-			})
+			}); err != nil {
+				t.Fatalf("creating test tag: %v", err)
+			}
 
 			dc, err := s.Finder.DefaultDatacenter(ctx)
 			if err != nil {

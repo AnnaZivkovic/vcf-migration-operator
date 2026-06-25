@@ -53,6 +53,11 @@ var (
 	}
 )
 
+type credentials struct {
+	username string
+	password string
+}
+
 func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
@@ -139,10 +144,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 	log.V(1).Info("source vCenter connectivity validated", "server", sourceVC.Server)
 
-	type credentials struct {
-		username string
-		password string
-	}
 	targetCredentialsByServer := make(map[string]credentials, len(migration.Spec.FailureDomains))
 
 	for i := range migration.Spec.FailureDomains {
@@ -159,49 +160,53 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 			targetCredentialsByServer[fd.Server] = creds
 		}
 
-		session, err := getVSphereSession(vsphereCtx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
-		if err != nil {
-			return "", fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
-		}
-
-		datacenter, err := session.Finder.Datacenter(vsphereCtx, fd.Topology.Datacenter)
-		if err != nil {
-			return "", fmt.Errorf("target datacenter %q on %s not found: %w", fd.Topology.Datacenter, fd.Server, err)
-		}
-		cluster, err := session.Finder.ClusterComputeResource(vsphereCtx, fd.Topology.ComputeCluster)
-		if err != nil {
-			return "", fmt.Errorf("target cluster %q on %s not found: %w", fd.Topology.ComputeCluster, fd.Server, err)
-		}
-		if _, err := session.Finder.Datastore(vsphereCtx, fd.Topology.Datastore); err != nil {
-			return "", fmt.Errorf("target datastore %q on %s not found: %w", fd.Topology.Datastore, fd.Server, err)
-		}
-		for _, networkName := range fd.Topology.Networks {
-			if _, err := session.Finder.Network(vsphereCtx, networkName); err != nil {
-				return "", fmt.Errorf("target network %q on %s not found: %w", networkName, fd.Server, err)
-			}
-		}
-		if fd.Topology.ResourcePool != "" {
-			if _, err := session.Finder.ResourcePool(vsphereCtx, fd.Topology.ResourcePool); err != nil {
-				return "", fmt.Errorf("target resource pool %q on %s not found: %w", fd.Topology.ResourcePool, fd.Server, err)
-			}
-		}
-		if fd.Topology.Folder != "" {
-			if _, err := session.Finder.Folder(vsphereCtx, fd.Topology.Folder); err != nil {
-				return "", fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
-			}
-		}
-		if fd.Topology.Template != "" {
-			if _, err := session.Finder.VirtualMachine(vsphereCtx, fd.Topology.Template); err != nil {
-				return "", fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
-			}
-		}
-		if err := validateTargetPrivileges(vsphereCtx, session, datacenter, cluster); err != nil {
-			return "", fmt.Errorf("validating target privileges for failure domain %q: %w", fd.Name, err)
+		if err := validateFailureDomain(vsphereCtx, fd, creds); err != nil {
+			return "", err
 		}
 		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
 	}
 
 	return "Preflight validation passed", nil
+}
+
+func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
+	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
+	if err != nil {
+		return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
+	}
+
+	datacenter, err := session.Finder.Datacenter(ctx, fd.Topology.Datacenter)
+	if err != nil {
+		return fmt.Errorf("target datacenter %q on %s not found: %w", fd.Topology.Datacenter, fd.Server, err)
+	}
+	cluster, err := session.Finder.ClusterComputeResource(ctx, fd.Topology.ComputeCluster)
+	if err != nil {
+		return fmt.Errorf("target cluster %q on %s not found: %w", fd.Topology.ComputeCluster, fd.Server, err)
+	}
+	if _, err := session.Finder.Datastore(ctx, fd.Topology.Datastore); err != nil {
+		return fmt.Errorf("target datastore %q on %s not found: %w", fd.Topology.Datastore, fd.Server, err)
+	}
+	for _, networkName := range fd.Topology.Networks {
+		if _, err := session.Finder.Network(ctx, networkName); err != nil {
+			return fmt.Errorf("target network %q on %s not found: %w", networkName, fd.Server, err)
+		}
+	}
+	if fd.Topology.ResourcePool != "" {
+		if _, err := session.Finder.ResourcePool(ctx, fd.Topology.ResourcePool); err != nil {
+			return fmt.Errorf("target resource pool %q on %s not found: %w", fd.Topology.ResourcePool, fd.Server, err)
+		}
+	}
+	if fd.Topology.Folder != "" {
+		if _, err := session.Finder.Folder(ctx, fd.Topology.Folder); err != nil {
+			return fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
+		}
+	}
+	if fd.Topology.Template != "" {
+		if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
+			return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
+		}
+	}
+	return validateTargetPrivileges(ctx, session, datacenter, cluster)
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) hasTargetVCenterConfiguration(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {
@@ -329,7 +334,7 @@ func validateTargetPrivileges(ctx context.Context, session *vsphere.Session, dat
 		label      string
 	}{
 		{
-			entity:     session.Client.Client.ServiceContent.RootFolder,
+			entity:     session.Client.ServiceContent.RootFolder,
 			privileges: rootTagPrivileges,
 			label:      "root folder",
 		},

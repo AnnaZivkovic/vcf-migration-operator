@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,7 +73,7 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			if rec := recover(); rec != nil {
 				klog.Errorf("recovered from panic serving %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
-				http.Error(w, fmt.Sprintf(`{"error":"internal server error"}`), http.StatusInternalServerError)
+				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 			}
 		}()
 		next.ServeHTTP(w, r)

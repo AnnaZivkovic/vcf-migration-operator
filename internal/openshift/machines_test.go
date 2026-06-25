@@ -95,7 +95,7 @@ func TestUpdateCPMSFailureDomain(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cpms := newTestCPMS(tt.initialState, tt.initialFDs)
-			machineClient := fakemachineclient.NewSimpleClientset(cpms)
+			machineClient := fakemachineclient.NewClientset(cpms)
 			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
 			ctx := context.Background()
@@ -179,7 +179,7 @@ func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 			cpms.Status.Replicas = tt.replicas
 			cpms.Status.UpdatedReplicas = tt.updated
 			cpms.Status.ReadyReplicas = tt.ready
-			machineClient := fakemachineclient.NewSimpleClientset(cpms)
+			machineClient := fakemachineclient.NewClientset(cpms)
 			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
 			complete, replicas, updated, ready, err := mgr.CheckControlPlaneRolloutStatus(context.Background())
@@ -228,7 +228,7 @@ func TestIsCPMSGenerationObserved(t *testing.T) {
 			cpms := newTestCPMS(machinev1.ControlPlaneMachineSetStateActive, nil)
 			cpms.Generation = tt.generation
 			cpms.Status.ObservedGeneration = tt.observedGeneration
-			machineClient := fakemachineclient.NewSimpleClientset(cpms)
+			machineClient := fakemachineclient.NewClientset(cpms)
 			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
 			got, err := mgr.IsCPMSGenerationObserved(context.Background())
