@@ -466,6 +466,10 @@ func (m *Model) Load(dir string) error {
 
 	m.Service = New(ctx, s)
 
+	if err = ctx.Map.AlignCounter(); err != nil {
+		return err
+	}
+
 	return m.resolveReferences(ctx)
 }
 
@@ -974,10 +978,7 @@ func RunContainer(ctx context.Context, c *vim25.Client, vm mo.Reference, args st
 
 // delay sleeps according to DelayConfig. If no delay specified, returns immediately.
 func (dc *DelayConfig) delay(method string) {
-	d := 0
-	if dc.Delay > 0 {
-		d = dc.Delay
-	}
+	d := max(dc.Delay, 0)
 	if md, ok := dc.MethodDelay[method]; ok {
 		d += md
 	}
