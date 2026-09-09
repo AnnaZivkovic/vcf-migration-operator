@@ -14,6 +14,7 @@
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
 | `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
 | `failureDomainMappings` | `[]FailureDomainMapping` | No | | Maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once. |
+| `nodeMigration` | `NodeMigrationSpec` | No | | Controls how nodes move to the target vCenter. When omitted, uses MachineSet/CPMS replacement. See [Node Migration API](node-migration-api.md). |
 
 ### MigrationState Enum
 
@@ -139,6 +140,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | `workerMachineSetNames` | `[]string` | Append-only inventory of destination worker MachineSet names (max 256), used to require the replacements after the source MachineSets are deleted |
 | `startTime` | `*metav1.Time` | When migration entered `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
+| `nodeMigration` | `NodeMigrationStatus` | Per-node move progress. Nil when using MachineSet/CPMS replacement. |
 
 ### Condition Types (in order)
 
