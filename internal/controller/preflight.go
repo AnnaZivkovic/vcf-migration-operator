@@ -291,7 +291,11 @@ var imageImportPrivileges = []string{
 // otherwise the cluster's default pool), Datastore.AllocateSpace on the target
 // datastore (required by OvfManager.CreateImportSpec's datastore parameter),
 // and VirtualMachine.Provisioning.MarkAsTemplate on the VM folder the imported
-// template lands in (vmFolder, or the datacenter VM folder when empty).
+// template lands in (vmFolder, or the datacenter VM folder when empty). When
+// vmFolder is empty the effective target is /<datacenter>/vm/<infraID>, which
+// is created after preflight (ensureDestinationInitialized) and inherits its
+// privileges from the datacenter VM folder, so validating the parent here is
+// the equivalent check.
 func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, datacenter *object.Datacenter, cluster *object.ClusterComputeResource, resourcePoolPath, datastore, vmFolder string) error {
 	if session == nil || session.Client == nil || session.Client.Client == nil {
 		return fmt.Errorf("session client must not be nil")
@@ -340,11 +344,10 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 			return fmt.Errorf("finding folder %q: %w", vmFolder, err)
 		}
 	} else {
-		folders, err := datacenter.Folders(ctx)
+		folder, err = dcVMFolder(ctx, datacenter)
 		if err != nil {
-			return fmt.Errorf("getting datacenter folders: %w", err)
+			return err
 		}
-		folder = folders.VmFolder
 	}
 	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, folder.Reference(),
 		[]string{"VirtualMachine.Provisioning.MarkAsTemplate"}, fmt.Sprintf("VM folder %q", folder.InventoryPath)); err != nil {
@@ -512,6 +515,23 @@ func checkInterferingRolloutResources(ctx context.Context, dynamicClient dynamic
 	return fmt.Errorf("remove interfering rollout resources before migration: %s", strings.Join(blockers, "; "))
 }
 
+// dcVMFolder returns the datacenter's VM folder. Every vSphere datacenter
+// has one, but Folders() can still yield an unusable folder when the
+// vmFolder property is absent — NewFolder wraps a zero managed-object
+// reference in a non-nil *Folder — so callers get a descriptive error
+// instead of a nil dereference or an empty reference passed to the
+// privilege API.
+func dcVMFolder(ctx context.Context, datacenter *object.Datacenter) (*object.Folder, error) {
+	folders, err := datacenter.Folders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting datacenter folders: %w", err)
+	}
+	if folders.VmFolder == nil || folders.VmFolder.Reference().Value == "" {
+		return nil, fmt.Errorf("datacenter %q has no VM folder", datacenter.Name())
+	}
+	return folders.VmFolder, nil
+}
+
 func validateTargetPrivileges(ctx context.Context, session *vsphere.Session, datacenter *object.Datacenter, cluster *object.ClusterComputeResource) error {
 	if session == nil || session.Client == nil || session.Client.Client == nil {
 		return fmt.Errorf("session client must not be nil")
@@ -526,9 +546,9 @@ func validateTargetPrivileges(ctx context.Context, session *vsphere.Session, dat
 	}
 
 	authMgr := object.NewAuthorizationManager(session.Client.Client)
-	folders, err := datacenter.Folders(ctx)
+	vmFolder, err := dcVMFolder(ctx, datacenter)
 	if err != nil {
-		return fmt.Errorf("getting datacenter folders: %w", err)
+		return err
 	}
 
 	checks := []struct {
@@ -542,9 +562,9 @@ func validateTargetPrivileges(ctx context.Context, session *vsphere.Session, dat
 			label:      "root folder",
 		},
 		{
-			entity:     folders.VmFolder.Reference(),
+			entity:     vmFolder.Reference(),
 			privileges: vmFolderPrivileges,
-			label:      fmt.Sprintf("VM folder %q", folders.VmFolder.InventoryPath),
+			label:      fmt.Sprintf("VM folder %q", vmFolder.InventoryPath),
 		},
 		{
 			entity:     datacenter.Reference(),
