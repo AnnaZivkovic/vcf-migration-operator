@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.18.0
+    controller-gen.kubebuilder.io/version: v0.21.0
   creationTimestamp: null
   name: vmwarecloudfoundationmigrations.migration.openshift.io
 spec:
@@ -101,8 +101,11 @@ spec:
                       - type
                       type: object
                     server:
-                      description: server is the fully-qualified domain name or the
-                        IP address of the vCenter server.
+                      description: |-
+                        server is the fully-qualified domain name or the IP address of the vCenter server.
+                        This must match the server field of an entry in the vcenters list.
+                        The match is case-sensitive; the value must be specified exactly as it appears in the vcenters entry.
+                        The value must be between 1 and 255 characters long.
                       maxLength: 255
                       minLength: 1
                       type: string

@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
@@ -67,7 +67,7 @@ func newReadyTestReconciler(cfgClient *configfake.Clientset, mcClient *machineco
 	return &VmwareCloudFoundationMigrationReconciler{
 		ConfigClient:        cfgClient,
 		MachineConfigClient: mcClient,
-		Recorder:            record.NewFakeRecorder(10),
+		Recorder:            events.NewFakeRecorder(10),
 	}
 }
 

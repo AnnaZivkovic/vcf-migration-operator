@@ -27,7 +27,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	fakekube "k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -229,7 +229,7 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 		})
 
 		It("should ignore the resource, mark it as not accepted, and record a warning event", func() {
-			fakeRecorder := record.NewFakeRecorder(10)
+			fakeRecorder := events.NewFakeRecorder(10)
 			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
@@ -311,7 +311,7 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 		})
 
 		It("should set the Ready condition to False with reason Paused and transition to Progressing on resume", func() {
-			fakeRecorder := record.NewFakeRecorder(10)
+			fakeRecorder := events.NewFakeRecorder(10)
 			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),

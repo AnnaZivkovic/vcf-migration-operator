@@ -287,7 +287,3 @@ type VmwareCloudFoundationMigrationList struct {
 	// +required
 	Items []VmwareCloudFoundationMigration `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&VmwareCloudFoundationMigration{}, &VmwareCloudFoundationMigrationList{})
-}

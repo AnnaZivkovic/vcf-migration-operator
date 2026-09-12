@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
 )
 
@@ -82,7 +82,7 @@ func TestEnsureWorkloadMigratedRolloutAndScaleDown(t *testing.T) {
 				if cond.Message != wantMsg {
 					t.Fatalf("workload condition message = %q, want %q", cond.Message, wantMsg)
 				}
-				recorder := resultReconciler.Recorder.(*record.FakeRecorder)
+				recorder := resultReconciler.Recorder.(*events.FakeRecorder)
 				event := waitForLastEvent(t, recorder)
 				if !strings.Contains(event, "control plane rolling out (1/3 updated, 1/3 ready)") {
 					t.Fatalf("last event = %q, want rollout progress substring", event)
@@ -212,7 +212,7 @@ func TestEnsureWorkloadMigratedRolloutAndScaleDown(t *testing.T) {
 				KubeClient:    fakekube.NewClientset(kubeObjects...),
 				ConfigClient:  configfake.NewClientset(configClientObjects...),
 				MachineClient: fakemachineclient.NewClientset(machineClientObjects...),
-				Recorder:      record.NewFakeRecorder(10),
+				Recorder:      events.NewFakeRecorder(10),
 			}
 			migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
 				ObjectMeta: metav1.ObjectMeta{
@@ -331,7 +331,7 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 				KubeClient:    fakekube.NewClientset(kubeObjects...),
 				ConfigClient:  configfake.NewClientset(configClientObjects...),
 				MachineClient: fakemachineclient.NewClientset(machineClientObjects...),
-				Recorder:      record.NewFakeRecorder(20),
+				Recorder:      events.NewFakeRecorder(20),
 			}
 			migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
 				ObjectMeta: metav1.ObjectMeta{Name: migrationv1alpha1.SingletonName, Generation: 1},
@@ -425,7 +425,7 @@ func TestRolloutLogsMachineLevelDetail(t *testing.T) {
 		KubeClient:    fakekube.NewClientset(kubeObjects...),
 		ConfigClient:  configfake.NewClientset(configClientObjects...),
 		MachineClient: fakemachineclient.NewClientset(machineClientObjects...),
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 	}
 	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{Name: migrationv1alpha1.SingletonName, Generation: 1},
@@ -481,7 +481,7 @@ func splitRolloutTestObjects(t *testing.T, objects []runtime.Object) (kube []run
 	return kube, config, machine
 }
 
-func waitForLastEvent(t *testing.T, recorder *record.FakeRecorder) string {
+func waitForLastEvent(t *testing.T, recorder *events.FakeRecorder) string {
 	t.Helper()
 	var last string
 	for {
@@ -792,16 +792,16 @@ func TestOldWorkersStallEventDebounce(t *testing.T) {
 // OldWorkersStalled Warning reason.
 func stalledEvents(t *testing.T, reconciler *VmwareCloudFoundationMigrationReconciler) []string {
 	t.Helper()
-	recorder := reconciler.Recorder.(*record.FakeRecorder)
-	var events []string
+	recorder := reconciler.Recorder.(*events.FakeRecorder)
+	var stalled []string
 	for {
 		select {
 		case event := <-recorder.Events:
 			if strings.Contains(event, "OldWorkersStalled") {
-				events = append(events, event)
+				stalled = append(stalled, event)
 			}
 		default:
-			return events
+			return stalled
 		}
 	}
 }
@@ -824,7 +824,7 @@ func newRolloutReconciler(t *testing.T, objects []runtime.Object) *VmwareCloudFo
 		KubeClient:    fakekube.NewClientset(kubeObjects...),
 		ConfigClient:  configfake.NewClientset(configObjects...),
 		MachineClient: fakemachineclient.NewClientset(machineObjects...),
-		Recorder:      record.NewFakeRecorder(20),
+		Recorder:      events.NewFakeRecorder(20),
 	}
 }
 
