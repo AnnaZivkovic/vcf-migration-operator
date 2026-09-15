@@ -31,7 +31,7 @@ import (
 	_ "github.com/vmware/govmomi/vapi/simulator"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	fakekube "k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
@@ -48,7 +48,7 @@ func newDestinationInitializedReconciler(server, username, password, infraID str
 			ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
 			Status:     configv1.InfrastructureStatus{InfrastructureName: infraID},
 		}),
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 }
 

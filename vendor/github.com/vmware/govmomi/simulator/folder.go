@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -110,12 +111,7 @@ func folderRemoveReference(ctx *Context, f *mo.Folder, o mo.Reference) {
 }
 
 func folderHasChildType(f *mo.Folder, kind string) bool {
-	for _, t := range f.ChildType {
-		if t == kind {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(f.ChildType, kind)
 }
 
 func (f *Folder) typeNotSupported() *soap.Fault {
@@ -1026,7 +1022,7 @@ func fillConfigSpecWithDatastore(ctx *Context, inputConfigSpec, configSpec *type
 func generateInitialPlacementAction(ctx *Context, vmSpec *types.PlaceVmsXClusterSpecVmPlacementSpec, pool *ResourcePool,
 	cluster *ClusterComputeResource, hostRequired, datastoreRequired bool) types.BaseClusterAction {
 
-	placementAction := &types.ClusterClusterInitialPlacementActionEx{
+	placementAction := &types.ClusterClusterInitialPlacementAction{
 		Pool: pool.Self,
 	}
 
@@ -1178,4 +1174,8 @@ func (f *Folder) PlaceVmsXCluster(ctx *Context, req *types.PlaceVmsXCluster) soa
 
 	body.Fault_ = Fault("", &types.InvalidArgument{InvalidProperty: "placementType"})
 	return body
+}
+
+func (f *Folder) SetCustomValue(ctx *Context, req *types.SetCustomValue) soap.HasFault {
+	return SetCustomValue(ctx, req)
 }
