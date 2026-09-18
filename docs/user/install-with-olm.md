@@ -49,10 +49,10 @@ kind: OperatorGroup
 metadata:
   name: vcf-migration-operator
   namespace: openshift-vcf-migration
-spec:
-  targetNamespaces:
-    - openshift-vcf-migration
+spec: {}
 ```
+
+The operator's ClusterServiceVersion only supports the `AllNamespaces` install mode. An OperatorGroup scoped to `targetNamespaces` fails the CSV with `UnsupportedOperatorGroup`; use an empty `spec: {}` as shown above.
 
 5. Install from OperatorHub in the OpenShift console, or create a `Subscription`:
 
@@ -94,7 +94,7 @@ oc patch clustercsidrivers.operator.openshift.io csi.vsphere.vmware.com \
   --type merge -p '{"spec":{"managementState":"Removed"}}'
 ```
 
-Setting `storages.operator.openshift.io/cluster` to `Unmanaged` or `Removed` is recommended; if it is still `Managed`, preflight passes with a warning.
+Do not change `storages.operator.openshift.io/cluster`. Leave it at the default `Managed` value; only `ClusterCSIDriver` needs to be `Removed`. Setting `Storage/cluster` to `Unmanaged` or `Removed` makes the `storage` ClusterOperator report an unhealthy state, which fails preflight's separate "all ClusterOperators must report Available" check. Leaving `Storage/cluster` at `Managed` passes preflight with an informational warning that can be disregarded.
 
 ## Create a Migration
 
