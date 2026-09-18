@@ -1,5 +1,5 @@
 FROM registry.access.redhat.com/ubi9/go-toolset:latest as builder
-ARG IMG=registry.redhat.io/vcf-migration/vcf-migration-rhel9-operator@sha256:726cdb633ea84630f806ee5c2485a07c3a0df2f7327cf74cf701a226eb55e9fc
+ARG IMG=registry.redhat.io/vcf-migration/vcf-migration-rhel9-operator@sha256:e037d03dad376562e86ef472bd0515b08f38acd815d9dbfde7924e0ab50b19de
 ARG ORIGINAL_IMG=registry.ci.openshift.org/origin/vcf-migration-operator:latest
 WORKDIR /code
 COPY ./ ./
@@ -42,8 +42,8 @@ USER 1001:0
 LABEL com.redhat.component="VCF Migration Operator"
 LABEL distribution-scope="public"
 LABEL name="vcf-migration/vcf-migration-operator-bundle"
-LABEL release="0.0.1"
-LABEL version="0.0.1"
+LABEL release="0.1.0"
+LABEL version="0.1.0"
 LABEL cpe="cpe:/a:redhat:vcf_migration_operator:0.1::el9"
 LABEL url="https://github.com/openshift/vcf-migration-operator"
 LABEL vendor="Red Hat, Inc."
