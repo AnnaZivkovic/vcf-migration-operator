@@ -3,6 +3,15 @@
   "gomod": {
     "enabled": false
   },
+  "npm": {
+    "enabled": false
+  },
+  "nvm": {
+    "enabled": false
+  },
+  "nodenv": {
+    "enabled": false
+  },
   "pruneBranchAfterAutomerge": true,
   "pruneStaleBranches": true,
   "semanticCommits": "enabled",
