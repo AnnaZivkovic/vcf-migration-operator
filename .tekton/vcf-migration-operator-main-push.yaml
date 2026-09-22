@@ -10,40 +10,33 @@ metadata:
     pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch == "main"
   creationTimestamp: null
   labels:
-    appstudio.openshift.io/application: vcf-migration-operator
-    appstudio.openshift.io/component: vcf-migration-operator-bundle
+    appstudio.openshift.io/application: vcf-migration-operator-main
+    appstudio.openshift.io/component: vcf-migration-operator-main
     pipelines.appstudio.openshift.io/type: build
-  name: vcf-migration-operator-bundle-on-push
+  name: vcf-migration-operator-on-push
   namespace: vcf-migration-operator-tenant
 spec:
   params:
-  - name: artifact-type
-    value: operatorbundle
   - name: git-url
     value: '{{source_url}}'
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator/vcf-migration-operator-bundle-main:{{revision}}
+    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator-main:{{revision}}
   - name: dockerfile
-    value: bundle.konflux.Dockerfile
+    value: Dockerfile
   - name: path-context
     value: .
-  - name: build-platforms
-    value:
-    - "linux/amd64"
   - name: hermetic
     value: "true"
   - name: prefetch-input
-    value: ""
+    value: '{"packages": [{"type": "gomod"}], "flags": ["gomod-vendor-check"]}'
   - name: build-source-image
     value: "true"
-  - name: build-image-index
-    value: "false"
   pipelineRef:
-    name: vcf-migration-operator-bundle-pipeline
+    name: vcf-migration-operator-pipeline
   taskRunTemplate:
-    serviceAccountName: build-pipeline-vcf-migration-operator-bundle
+    serviceAccountName: build-pipeline-vcf-migration-operator-main
   workspaces:
   - name: git-auth
     secret:
