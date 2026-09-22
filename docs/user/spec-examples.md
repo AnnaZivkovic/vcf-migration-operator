@@ -81,6 +81,8 @@ spec:
 
 Multiple failure domains can share the same `region` while using different `zone` values. Region/zone are mirrored as OpenShift topology tags on the destination vCenter.
 
+Tag reuse on previously-used hardware: if the target datacenter already has any tag in the `openshift-region` category (or the cluster in `openshift-zone`), the operator reuses it and skips tag creation. The spec values still drive the target-side OpenShift failure-domain config and node topology labels, so set them to match the existing tags (check with `govc tags.attached.ls -r /<datacenter>` and `... -r /<datacenter>/host/<cluster>`).
+
 ## Auto-Resolved RHCOS Image
 
 Set `image` without `ovaUrl` (an empty `image` object) and the operator resolves the RHCOS OVA from the CVO-delivered `coreos-bootimages` ConfigMap, imports it as a VM template into each failure domain, and populates `topology.template` automatically. `topology.template` is not required in this mode. When `image` is omitted entirely, no image import happens and `topology.template` must be set manually in each failure domain.
