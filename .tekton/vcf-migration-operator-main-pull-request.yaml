@@ -11,8 +11,8 @@ metadata:
     pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch == "main"
   creationTimestamp: null
   labels:
-    appstudio.openshift.io/application: vcf-migration-operator
-    appstudio.openshift.io/component: vcf-migration-operator
+    appstudio.openshift.io/application: vcf-migration-operator-main
+    appstudio.openshift.io/component: vcf-migration-operator-main
     pipelines.appstudio.openshift.io/type: build
   name: vcf-migration-operator-on-pull-request
   namespace: vcf-migration-operator-tenant
@@ -23,7 +23,7 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator/vcf-migration-operator-main:on-pr-{{revision}}
+    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/vcf-migration-operator-main:on-pr-{{revision}}
   - name: dockerfile
     value: Dockerfile
   - name: path-context
@@ -39,7 +39,7 @@ spec:
   pipelineRef:
     name: vcf-migration-operator-pipeline
   taskRunTemplate:
-    serviceAccountName: build-pipeline-vcf-migration-operator
+    serviceAccountName: build-pipeline-vcf-migration-operator-main
   workspaces:
   - name: git-auth
     secret:
