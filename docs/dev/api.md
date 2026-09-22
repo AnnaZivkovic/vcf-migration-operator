@@ -46,8 +46,8 @@ When `image` is set, the operator imports the OVA during the `DestinationImageIm
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | `string` | Yes | Unique failure domain name (1-256 chars) |
-| `region` | `string` | Yes | Region tag name, category `openshift-region` (1-80 chars) |
-| `zone` | `string` | Yes | Zone tag name, category `openshift-zone` (1-80 chars) |
+| `region` | `string` | Yes | Region tag name, category `openshift-region` (1-80 chars). Reused as-is if the target datacenter already carries an `openshift-region` tag. |
+| `zone` | `string` | Yes | Zone tag name, category `openshift-zone` (1-80 chars). Reused as-is if the target cluster already carries an `openshift-zone` tag. |
 | `server` | `string` | Yes | Target vCenter FQDN (1-255 chars) |
 | `topology.datacenter` | `string` | Yes | Datacenter name (max 80 chars) |
 | `topology.computeCluster` | `string` | Yes | Path: `/<dc>/host/<cluster>` |
