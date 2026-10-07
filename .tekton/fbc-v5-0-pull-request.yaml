@@ -11,8 +11,8 @@ metadata:
       == "fbc"
   creationTimestamp: null
   labels:
-    appstudio.openshift.io/application: fbc-v5-0
-    appstudio.openshift.io/component: fbc-v5-0
+    appstudio.openshift.io/application: fbc-5-0
+    appstudio.openshift.io/component: fbc-5-0
     pipelines.appstudio.openshift.io/type: build
   name: fbc-v5-0-on-pull-request
   namespace: vcf-migration-operator-tenant
@@ -25,7 +25,7 @@ spec:
   - name: image-expires-after
     value: 5d
   - name: output-image
-    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/fbc-v5-0/fbc-v5-0:on-pr-{{revision}}
+    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/fbc-5-0:on-pr-{{revision}}
   - name: path-context
     value: .
   - name: revision
@@ -37,7 +37,7 @@ spec:
       - 'BASE_IMAGE=registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.18'
       - 'OCP_VERSION=fbc-v5-0'
   taskRunTemplate:
-    serviceAccountName: build-pipeline-fbc-v5-0
+    serviceAccountName: build-pipeline-fbc-5-0
   pipelineRef:
     resolver: git
     params:

@@ -4,16 +4,17 @@ metadata:
   annotations:
     build.appstudio.openshift.io/repo: https://github.com/openshift/vcf-migration-operator?rev={{revision}}
     build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
     build.appstudio.redhat.com/target_branch: '{{target_branch}}'
     pipelinesascode.tekton.dev/max-keep-runs: "3"
-    pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch
+    pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch
       == "fbc"
   creationTimestamp: null
   labels:
-    appstudio.openshift.io/application: fbc-v4-18
-    appstudio.openshift.io/component: fbc-v4-18
+    appstudio.openshift.io/application: fbc-4-23
+    appstudio.openshift.io/component: fbc-4-23
     pipelines.appstudio.openshift.io/type: build
-  name: fbc-v4-18-on-push
+  name: fbc-v4-23-on-pull-request
   namespace: vcf-migration-operator-tenant
 spec:
   params:
@@ -21,8 +22,10 @@ spec:
     value: Dockerfile
   - name: git-url
     value: '{{source_url}}'
+  - name: image-expires-after
+    value: 5d
   - name: output-image
-    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/fbc-v4-18/fbc-v4-18:{{revision}}
+    value: quay.io/redhat-user-workloads/vcf-migration-operator-tenant/fbc-4-23:on-pr-{{revision}}
   - name: path-context
     value: .
   - name: revision
@@ -31,10 +34,10 @@ spec:
     value: "true"
   - name: build-args
     value:
-      - 'BASE_IMAGE=registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.18'
-      - 'OCP_VERSION=fbc-v4-18'
+      - 'BASE_IMAGE=registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.23'
+      - 'OCP_VERSION=fbc-v4-23'
   taskRunTemplate:
-    serviceAccountName: build-pipeline-fbc-v4-18
+    serviceAccountName: build-pipeline-fbc-4-23
   pipelineRef:
     resolver: git
     params:
