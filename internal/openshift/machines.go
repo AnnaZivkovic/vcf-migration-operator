@@ -119,6 +119,19 @@ func (m *MachineManager) GetMachineSet(ctx context.Context, name string) (*machi
 	return ms, nil
 }
 
+// ListMachineSets returns all MachineSets in the openshift-machine-api namespace.
+func (m *MachineManager) ListMachineSets(ctx context.Context) ([]*machinev1beta1.MachineSet, error) {
+	msList, err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing machinesets: %w", err)
+	}
+	result := make([]*machinev1beta1.MachineSet, 0, len(msList.Items))
+	for i := range msList.Items {
+		result = append(result, &msList.Items[i])
+	}
+	return result, nil
+}
+
 // GetMachineSetsByVCenter returns all MachineSets whose provider spec references
 // the given vCenter server. An empty vcenterServer is rejected so callers cannot
 // accidentally match every MachineSet (for example before scaling source workers).
@@ -139,7 +152,7 @@ func (m *MachineManager) GetMachineSetsByVCenter(ctx context.Context, vcenterSer
 	for i := range msList.Items {
 		ms := &msList.Items[i]
 
-		providerSpec, err := extractVSphereProviderSpec(ms)
+		providerSpec, err := ExtractVSphereProviderSpec(ms)
 		if err != nil {
 			log.V(3).Info("skipping machineset, cannot extract provider spec", "name", ms.Name, "err", err)
 			continue
@@ -150,6 +163,43 @@ func (m *MachineManager) GetMachineSetsByVCenter(ctx context.Context, vcenterSer
 		}
 	}
 
+	return result, nil
+}
+
+// GetMachineSetsByFailureDomain returns all MachineSets on the given vCenter
+// server whose provider spec workspace matches the failure domain's datacenter
+// and, when the failure domain specifies one, resource pool. Machine and
+// MachineSet specs carry no FailureDomain field, so the provider spec workspace
+// is the only linkage to a failure domain. An empty resource pool in the
+// failure domain matches every pool in that datacenter.
+func (m *MachineManager) GetMachineSetsByFailureDomain(ctx context.Context, vcenterServer string, fd *configv1.VSpherePlatformFailureDomainSpec) ([]*machinev1beta1.MachineSet, error) {
+	if fd == nil {
+		return nil, fmt.Errorf("failure domain must not be nil")
+	}
+
+	log := klog.FromContext(ctx)
+	byServer, err := m.GetMachineSetsByVCenter(ctx, vcenterServer)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]*machinev1beta1.MachineSet, 0, len(byServer))
+	for _, ms := range byServer {
+		providerSpec, err := ExtractVSphereProviderSpec(ms)
+		if err != nil {
+			log.V(3).Info("skipping machineset, cannot extract provider spec", "name", ms.Name, "err", err)
+			continue
+		}
+		if providerSpec.Workspace == nil || providerSpec.Workspace.Datacenter != fd.Topology.Datacenter {
+			continue
+		}
+		if fd.Topology.ResourcePool != "" && providerSpec.Workspace.ResourcePool != fd.Topology.ResourcePool {
+			continue
+		}
+		result = append(result, ms)
+	}
+
+	log.V(2).Info("matched machinesets for failure domain", "failureDomain", fd.Name, "vcenterServer", vcenterServer, "machinesets", len(result))
 	return result, nil
 }
 
@@ -643,8 +693,8 @@ func updateMachineSetProviderSpec(ctx context.Context, ms *machinev1beta1.Machin
 	return nil
 }
 
-// extractVSphereProviderSpec extracts the VSphereMachineProviderSpec from a MachineSet.
-func extractVSphereProviderSpec(ms *machinev1beta1.MachineSet) (*machinev1beta1.VSphereMachineProviderSpec, error) {
+// ExtractVSphereProviderSpec extracts the VSphereMachineProviderSpec from a MachineSet.
+func ExtractVSphereProviderSpec(ms *machinev1beta1.MachineSet) (*machinev1beta1.VSphereMachineProviderSpec, error) {
 	if ms == nil {
 		return nil, fmt.Errorf("machineset must not be nil")
 	}

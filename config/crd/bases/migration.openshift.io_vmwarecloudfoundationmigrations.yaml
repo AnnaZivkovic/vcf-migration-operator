@@ -58,6 +58,47 @@ spec:
           spec:
             description: spec defines the desired state of VmwareCloudFoundationMigration.
             properties:
+              failureDomainMappings:
+                description: |-
+                  failureDomainMappings maps source failure domains to destination failure
+                  domains by name.
+
+                  When omitted, exactly one source failure domain and one destination
+                  failure domain must exist, and they are mapped to each other implicitly.
+
+                  Minimum items: 1.
+                  Maximum items: 64.
+                items:
+                  description: FailureDomainMapping maps one source failure domain
+                    to one destination failure domain.
+                  properties:
+                    destination:
+                      description: |-
+                        destination is the name of the entry in spec.failureDomains that receives
+                        the workloads migrated from source.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    source:
+                      description: |-
+                        source is the name of the failure domain in the cluster's Infrastructure
+                        resource that this entry migrates workloads from.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - destination
+                  - source
+                  type: object
+                maxItems: 64
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: destination must be unique across mappings
+                  rule: self.map(m, m.destination).distinct().size() == self.size()
               failureDomains:
                 description: |-
                   failureDomains defines failure domains for the target vCenter. The embedded
@@ -398,6 +439,35 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failureDomainMappings:
+                description: |-
+                  failureDomainMappings is the effective source-to-destination failure domain
+                  mapping resolved at preflight. When spec.failureDomainMappings is omitted it
+                  holds the single inferred pair. Immutable once set.
+                items:
+                  description: FailureDomainMapping maps one source failure domain
+                    to one destination failure domain.
+                  properties:
+                    destination:
+                      description: |-
+                        destination is the name of the entry in spec.failureDomains that receives
+                        the workloads migrated from source.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    source:
+                      description: |-
+                        source is the name of the failure domain in the cluster's Infrastructure
+                        resource that this entry migrates workloads from.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - destination
+                  - source
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               lastUpdateTime:
                 description: lastUpdateTime is when the migration status was last
                   updated.
@@ -463,6 +533,21 @@ spec:
                 description: startTime is when the migration started.
                 format: date-time
                 type: string
+              workerMachineSetNames:
+                description: |-
+                  workerMachineSetNames records the destination worker MachineSet names
+                  generated for the recorded mappings. Persisted before source cleanup so
+                  retries that re-enter workload migration after the source MachineSets
+                  were deleted still require these MachineSets to exist and be ready;
+                  mappings whose source failure domain had no MachineSets contribute no
+                  names and intentionally stay empty.
+
+                  Maximum items: 256.
+                items:
+                  type: string
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: atomic
             type: object
         type: object
     served: true

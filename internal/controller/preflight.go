@@ -109,6 +109,39 @@ func validateFailureDomainTypes(fds []configv1.VSpherePlatformFailureDomainSpec)
 	return nil
 }
 
+func (r *VmwareCloudFoundationMigrationReconciler) validateMigrationFailureDomains(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) ([]migrationv1alpha1.FailureDomainMapping, error) {
+	infra, err := openshift.NewInfrastructureManager(r.ConfigClient).Get(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting infrastructure for failure domain validation: %w", err)
+	}
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		if err := validateFailureDomainTypes(infra.Spec.PlatformSpec.VSphere.FailureDomains); err != nil {
+			return nil, fmt.Errorf("validating source failure domains: %w", err)
+		}
+	}
+	if err := validateSourceVCenterCount(infra); err != nil {
+		return nil, err
+	}
+	var sourceFDs []configv1.VSpherePlatformFailureDomainSpec
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		sourceFDs = infra.Spec.PlatformSpec.VSphere.FailureDomains
+	}
+	if err := validateSourceFDTopologyDisjoint(sourceFDs); err != nil {
+		return nil, err
+	}
+	mappings, err := resolveFailureDomainMappings(migration.Spec.FailureDomainMappings, sourceFDs, migration.Spec.FailureDomains)
+	if err != nil {
+		return nil, err
+	}
+	if infra.Status.InfrastructureName == "" {
+		return nil, fmt.Errorf("infrastructure status has no InfrastructureName")
+	}
+	if err := r.validateMachineSetNameCollisions(ctx, infra.Status.InfrastructureName, mappings, sourceFDs, migration.Spec.FailureDomains); err != nil {
+		return nil, err
+	}
+	return mappings, nil
+}
+
 func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
 	log := klog.FromContext(ctx).V(1)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
@@ -125,6 +158,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	if err := validateFailureDomainTypes(migration.Spec.FailureDomains); err != nil {
 		return "", err
 	}
+	if err := validateFailureDomainServers(migration.Spec.FailureDomains); err != nil {
+		return "", err
+	}
 	if migration.Spec.TargetVCenterCredentialsSecret.Name == "" {
 		return "", fmt.Errorf("spec.targetVCenterCredentialsSecret.name must not be empty")
 	}
@@ -138,14 +174,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		return "", fmt.Errorf("target credentials secret %s/%s not found: %w", ns, secretRef.Name, err)
 	}
 
-	infra, err := openshift.NewInfrastructureManager(r.ConfigClient).Get(ctx)
+	mappings, err := r.validateMigrationFailureDomains(ctx, migration)
 	if err != nil {
-		return "", fmt.Errorf("getting infrastructure for failure domain validation: %w", err)
+		return "", err
 	}
-	if infra.Spec.PlatformSpec.VSphere != nil {
-		if err := validateFailureDomainTypes(infra.Spec.PlatformSpec.VSphere.FailureDomains); err != nil {
-			return "", fmt.Errorf("validating source failure domains: %w", err)
-		}
+
+	if err := runPreflightStep(log, "source MachineSet coverage", func() error {
+		return r.validatePreflightSourceCoverage(ctx, mappings)
+	}); err != nil {
+		return "", err
 	}
 
 	if err := runPreflightStep(log, "cluster readiness", func() error {
@@ -232,6 +269,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}, "failureDomainCount", len(migration.Spec.FailureDomains)); err != nil {
 		return "", err
 	}
+
+	// Record the effective mapping so later phases and immutability checks use
+	// the pairs resolved at preflight.
+	migration.Status.FailureDomainMappings = mappings
 
 	message := "Preflight validation passed"
 	if storageWarning != "" {
@@ -603,6 +644,36 @@ func validateUniqueFailureDomainNames(failureDomains []configv1.VSpherePlatformF
 	}
 	sort.Strings(names)
 	return fmt.Errorf("duplicate failure domain names are not allowed: %s", strings.Join(names, ", "))
+}
+
+// validatePreflightSourceCoverage rejects a migration plan whose source
+// vCenter runs worker capacity that no source failure domain mapping covers,
+// before the mapping is published as immutable or any control plane mutation
+// starts. The recorded-names half of the coverage gate runs later, at
+// scale-down, once the destination MachineSets exist.
+func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightSourceCoverage(ctx context.Context, mappings []migrationv1alpha1.FailureDomainMapping) error {
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
+	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	if err != nil {
+		return fmt.Errorf("getting source vCenter: %w", err)
+	}
+	infra, err := infraMgr.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("getting infrastructure: %w", err)
+	}
+	var sourceFDs []configv1.VSpherePlatformFailureDomainSpec
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		for _, fd := range infra.Spec.PlatformSpec.VSphere.FailureDomains {
+			if fd.Server == sourceVC.Server {
+				sourceFDs = append(sourceFDs, fd)
+			}
+		}
+	}
+	msList, err := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient).GetMachineSetsByVCenter(ctx, sourceVC.Server)
+	if err != nil {
+		return fmt.Errorf("getting source MachineSets: %w", err)
+	}
+	return validateSourceMachineSetMappingCoverage(ctx, msList, mappings, sourceFDs)
 }
 
 func listDynamicResourceNames(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource) ([]string, error) {

@@ -113,6 +113,23 @@ type SecretReference struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// FailureDomainMapping maps one source failure domain to one destination failure domain.
+type FailureDomainMapping struct {
+	// source is the name of the failure domain in the cluster's Infrastructure
+	// resource that this entry migrates workloads from.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Source string `json:"source"`
+
+	// destination is the name of the entry in spec.failureDomains that receives
+	// the workloads migrated from source.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Destination string `json:"destination"`
+}
+
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationSpec struct {
 	// state controls the workflow: Pending, Running, Paused.
@@ -138,6 +155,22 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(fd, has(fd.topology.template) && fd.topology.template != '')",message="topology.template is required for every failure domain"
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
+
+	// failureDomainMappings maps source failure domains to destination failure
+	// domains by name.
+	//
+	// When omitted, exactly one source failure domain and one destination
+	// failure domain must exist, and they are mapped to each other implicitly.
+	//
+	// Minimum items: 1.
+	// Maximum items: 64.
+	// +optional
+	// +listType=map
+	// +listMapKey=source
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.map(m, m.destination).distinct().size() == self.size()",message="destination must be unique across mappings"
+	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
@@ -163,6 +196,26 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// failureDomainMappings is the effective source-to-destination failure domain
+	// mapping resolved at preflight. When spec.failureDomainMappings is omitted it
+	// holds the single inferred pair. Immutable once set.
+	// +optional
+	// +listType=atomic
+	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
+
+	// workerMachineSetNames records the destination worker MachineSet names
+	// generated for the recorded mappings. Persisted before source cleanup so
+	// retries that re-enter workload migration after the source MachineSets
+	// were deleted still require these MachineSets to exist and be ready;
+	// mappings whose source failure domain had no MachineSets contribute no
+	// names and intentionally stay empty.
+	//
+	// Maximum items: 256.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=256
+	WorkerMachineSetNames []string `json:"workerMachineSetNames,omitempty"`
 
 	// sourceVCenter records the vCenter server removed during source cleanup.
 	// It is captured before any cleanup side effects so retries stay bound to

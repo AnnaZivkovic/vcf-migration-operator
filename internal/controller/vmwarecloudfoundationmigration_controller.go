@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -329,6 +330,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 		migrationv1alpha1.ConditionWorkloadMigrated:       r.ensureWorkloadMigrated,
 		migrationv1alpha1.ConditionSourceCleaned:          r.ensureSourceCleaned,
 		migrationv1alpha1.ConditionReady:                  r.ensureReady,
+	}
+
+	if stop, err := r.checkMappingForReconcile(ctx, migration, baseStatus); stop || err != nil {
+		return ctrl.Result{}, err
 	}
 
 	r.seedReadyCondition(migration)
@@ -744,80 +749,69 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 	}
 
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
-	infraID, err := infraMgr.GetInfrastructureID(ctx)
+	infra, err := infraMgr.Get(ctx)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting infrastructure ID: %w", err)
+		return ctrl.Result{}, fmt.Errorf("getting infrastructure: %w", err)
 	}
-
-	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting source vCenter: %w", err)
+	if infra.Status.InfrastructureName == "" {
+		return ctrl.Result{}, fmt.Errorf("infrastructure status has no InfrastructureName")
 	}
+	infraID := infra.Status.InfrastructureName
 
 	machineMgr := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient)
 	targetFDNames := failureDomainNames(migration.Spec.FailureDomains)
 
-	r.updateWorkloadProgress(ctx, migration, machineMgr, infraID, sourceVC.Server)
+	// The effective mapping recorded at preflight drives worker MachineSet
+	// creation; spec.failureDomainMappings may have been cleared since, and the
+	// Infrastructure legitimately changes during migration, so neither is
+	// re-resolved here.
+	mappings := migration.Status.FailureDomainMappings
+	if len(mappings) == 0 {
+		return ctrl.Result{}, fmt.Errorf("no failure domain mappings recorded in status: preflight must complete before workload migration")
+	}
+	var infraFDs []configv1.VSpherePlatformFailureDomainSpec
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		infraFDs = infra.Spec.PlatformSpec.VSphere.FailureDomains
+	}
+	// All source failure domains share one vCenter (validated at preflight), so
+	// the first mapping's source failure domain identifies the source server.
+	// Never use GetSourceVCenter here: the destination vCenter may already be
+	// VCenters[0]'s neighbor and the source is removed late in the migration.
+	sourceFD := findFailureDomainByName(infraFDs, mappings[0].Source)
+	if sourceFD == nil {
+		return ctrl.Result{}, fmt.Errorf("resolving source failure domain %q in infrastructure", mappings[0].Source)
+	}
+	sourceServer := sourceFD.Server
+
+	r.updateWorkloadProgress(ctx, migration, machineMgr, infraID, sourceServer)
 
 	// Step 1: Ensure target worker MachineSets exist (idempotent: create only missing ones).
-	allTargetMSExist := true
-	for i := range migration.Spec.FailureDomains {
-		msName := workerMachineSetName(infraID, migration.Spec.FailureDomains[i].Name)
-		if _, err := machineMgr.GetMachineSet(ctx, msName); err != nil {
-			allTargetMSExist = false
-			break
-		}
+	// Every generated name must be present, not just the base one: when a
+	// destination failure domain receives multiple source MachineSets, copies
+	// named base-2, base-3, ... are generated, and a missing copy must re-enter
+	// the creation loop below instead of proceeding to scale-down, which would
+	// silently drop capacity.
+	allTargetMSExist, err := targetMachineSetsExist(ctx, machineMgr, infraID, mappings, infraFDs, migration.Spec.FailureDomains, migration.Status.WorkerMachineSetNames)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	if !allTargetMSExist {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Creating new worker MachineSets")
-		existingMachineSets, err := machineMgr.GetMachineSetsByVCenter(ctx, sourceVC.Server)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("getting existing MachineSets: %w", err)
-		}
-		if len(existingMachineSets) == 0 {
-			return ctrl.Result{}, fmt.Errorf("no existing MachineSets found for source vCenter %s", sourceVC.Server)
-		}
-		var totalReplicas int32
-		for _, ms := range existingMachineSets {
-			if ms.Spec.Replicas != nil {
-				totalReplicas += *ms.Spec.Replicas
-			}
-		}
-		replicasPerFD := totalReplicas / int32(len(migration.Spec.FailureDomains))
-		if replicasPerFD < 1 {
-			replicasPerFD = 1
-		}
-		template := existingMachineSets[0]
-		createdAny := false
-		for i := range migration.Spec.FailureDomains {
-			fd := &migration.Spec.FailureDomains[i]
-			msName := workerMachineSetName(infraID, fd.Name)
-			if _, err := machineMgr.GetMachineSet(ctx, msName); err == nil {
-				log.V(1).Info("worker MachineSet already exists, skipping", "name", msName)
-				continue
-			}
-			replicas := replicasPerFD
-			if i == len(migration.Spec.FailureDomains)-1 {
-				replicas = totalReplicas - replicasPerFD*int32(len(migration.Spec.FailureDomains)-1)
-				if replicas < 1 {
-					replicas = 1
-				}
-			}
-			if _, err := machineMgr.CreateWorkerMachineSet(ctx, msName, replicas, fd, template, infraID); err != nil {
-				return ctrl.Result{}, fmt.Errorf("creating worker MachineSet %q: %w", msName, err)
-			}
-			createdAny = true
-			log.V(1).Info("created worker MachineSet", "name", msName, "replicas", replicas)
-		}
-		if createdAny {
-			r.Recorder.Eventf(migration, nil, "Normal", "WorkersCreated", "WorkersCreated", "New worker MachineSets created on target vCenter")
-		}
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Workers created, waiting for machines ready")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.createMappedWorkerMachineSets(ctx, migration, machineMgr, infraID, mappings, infraFDs)
 	}
 
 	// Step 2: Wait for target worker machines and nodes to be ready (cluster state).
-	readiness, err := checkWorkerReadiness(ctx, machineMgr, migration.Spec.FailureDomains, infraID)
+	workerFDs, err := workerReadinessFailureDomains(ctx, machineMgr, infraID, mappings, infraFDs, migration.Spec.FailureDomains, migration.Status.WorkerMachineSetNames)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	// Readiness must never pass on an empty failure-domain list: destination
+	// MachineSets were recorded, so an empty list means they are gone.
+	if len(workerFDs) == 0 && len(migration.Status.WorkerMachineSetNames) > 0 {
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+			"Waiting for recorded target worker MachineSets to exist")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	readiness, err := checkWorkerReadiness(ctx, machineMgr, workerFDs, infraID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -939,43 +933,18 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting old MachineSets: %w", err)
 	}
-	scaledAny := false
-	for _, ms := range oldMachineSets {
-		if ms.Spec.Replicas != nil && *ms.Spec.Replicas > 0 {
-			if err := machineMgr.ScaleMachineSet(ctx, ms.Name, 0); err != nil {
-				return ctrl.Result{}, fmt.Errorf("scaling old MachineSet %q to 0: %w", ms.Name, err)
-			}
-			scaledAny = true
-			log.V(1).Info("scaled old MachineSet to 0", "name", ms.Name)
-		}
+	requeued, err := r.scaleDownSourceMachineSets(ctx, migration, machineMgr, infraMgr, oldMachineSets, sourceVC, infraID)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	if scaledAny {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Old workers scaled down, waiting for deletion")
-		r.Recorder.Eventf(migration, nil, "Normal", "ControlPlaneRolledOut", "ControlPlaneRolledOut", "Control plane rollout complete on target vCenter")
-		r.Recorder.Eventf(migration, nil, "Normal", "OldWorkersScaledDown", "OldWorkersScaledDown", "Old worker MachineSets scaled to 0")
+	if requeued {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Step 7: Wait for old machines and nodes to be deleted.
-	allDeleted := true
-	for _, ms := range oldMachineSets {
-		machinesGone, remaining, err := machineMgr.CheckMachinesDeleted(ctx, ms.Name)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("checking machine deletion for %q: %w", ms.Name, err)
-		}
-		if !machinesGone {
-			log.V(1).Info("old machines still present", "machineSet", ms.Name, "remaining", remaining)
-			allDeleted = false
-			continue
-		}
-		nodesGone, nodeRemaining, err := machineMgr.CheckNodesDeletedForMachines(ctx, ms.Name)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("checking node deletion for %q: %w", ms.Name, err)
-		}
-		if !nodesGone {
-			log.V(1).Info("old nodes still present", "machineSet", ms.Name, "remaining", nodeRemaining)
-			allDeleted = false
-		}
+	allDeleted, err := oldMachinesAndNodesDeleted(ctx, log, machineMgr, oldMachineSets)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	if !allDeleted {
 		detail, eventNote, key, err := oldWorkerStallDetail(ctx, log, machineMgr, oldMachineSets)
@@ -1020,6 +989,121 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Workload migrated to target vCenter")
 	r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionWorkloadMigrated, migrationv1alpha1.ConditionWorkloadMigrated, "All workloads migrated to target vCenter")
 	return ctrl.Result{}, nil
+}
+
+// scaleDownSourceMachineSets runs Step 6: it fails closed on unverified source
+// MachineSet coverage, re-records any destination names lost to a crash, then
+// scales the source MachineSets to 0. It reports whether a requeue is needed
+// because at least one MachineSet was scaled.
+func (r *VmwareCloudFoundationMigrationReconciler) scaleDownSourceMachineSets(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, machineMgr *openshift.MachineManager, infraMgr *openshift.InfrastructureManager, oldMachineSets []*machinev1beta1.MachineSet, sourceVC *configv1.VSpherePlatformVCenterSpec, infraID string) (bool, error) {
+	log := klog.FromContext(ctx)
+	condType := migrationv1alpha1.ConditionWorkloadMigrated
+	// Fail closed before scale-down when a source MachineSet with running
+	// replicas has no verified replacement destination MachineSet.
+	infra, err := infraMgr.Get(ctx)
+	if err != nil {
+		return false, fmt.Errorf("getting infrastructure: %w", err)
+	}
+	var sourceFDs []configv1.VSpherePlatformFailureDomainSpec
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		for _, fd := range infra.Spec.PlatformSpec.VSphere.FailureDomains {
+			if fd.Server == sourceVC.Server {
+				sourceFDs = append(sourceFDs, fd)
+			}
+		}
+	}
+	// Re-derive and re-record destination MachineSet names a crash between
+	// creation and updateStatus may have lost, so the coverage gate below can
+	// pass on verified replacements that already exist. Recovered names are
+	// durably published before any scale-down: the final updateStatus happens
+	// after this destructive step, and once the source MachineSets are gone
+	// the names cannot be re-derived.
+	recovered, err := recoverUnrecordedDestinationNames(ctx, machineMgr, migration, oldMachineSets, infraID, migration.Status.FailureDomainMappings, sourceFDs)
+	if err != nil {
+		return false, fmt.Errorf("recovering unrecorded destination MachineSet names before scale-down: %w", err)
+	}
+	if err := r.persistWorkerMachineSetNames(ctx, migration, recovered); err != nil {
+		return false, fmt.Errorf("persisting recovered destination MachineSet names before scale-down: %w", err)
+	}
+	if err := validateSourceMachineSetCoverage(ctx, oldMachineSets, infraID, migration.Status.FailureDomainMappings, sourceFDs, migration.Status.WorkerMachineSetNames); err != nil {
+		return false, fmt.Errorf("validating source MachineSet coverage before scale-down: %w", err)
+	}
+	scaledAny := false
+	for _, ms := range oldMachineSets {
+		// nil replicas default to 1 in MAPI, so nil counts as running capacity.
+		if ms.Spec.Replicas == nil || *ms.Spec.Replicas > 0 {
+			if err := machineMgr.ScaleMachineSet(ctx, ms.Name, 0); err != nil {
+				return false, fmt.Errorf("scaling old MachineSet %q to 0: %w", ms.Name, err)
+			}
+			scaledAny = true
+			log.V(1).Info("scaled old MachineSet to 0", "name", ms.Name)
+		}
+	}
+	if !scaledAny {
+		return false, nil
+	}
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Old workers scaled down, waiting for deletion")
+	r.Recorder.Eventf(migration, nil, "Normal", "ControlPlaneRolledOut", "ControlPlaneRolledOut", "Control plane rollout complete on target vCenter")
+	r.Recorder.Eventf(migration, nil, "Normal", "OldWorkersScaledDown", "OldWorkersScaledDown", "Old worker MachineSets scaled to 0")
+	return true, nil
+}
+
+// persistWorkerMachineSetNames durably commits newly recorded destination
+// worker MachineSet names before destructive cleanup, failing closed when
+// publication fails: the names are derived from source MachineSets that are
+// about to be deleted, so an in-memory-only copy cannot be re-derived on a
+// later reconcile.
+func (r *VmwareCloudFoundationMigrationReconciler) persistWorkerMachineSetNames(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
+			return err
+		}
+		changed := false
+		for _, name := range names {
+			if !slices.Contains(latest.Status.WorkerMachineSetNames, name) {
+				latest.Status.WorkerMachineSetNames = append(latest.Status.WorkerMachineSetNames, name)
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		return r.Status().Update(ctx, latest)
+	})
+	if err != nil {
+		return fmt.Errorf("updating migration status: %w", err)
+	}
+	return nil
+}
+
+// oldMachinesAndNodesDeleted reports whether every machine and node backing
+// the given MachineSets has been deleted.
+func oldMachinesAndNodesDeleted(ctx context.Context, log klog.Logger, machineMgr *openshift.MachineManager, machineSets []*machinev1beta1.MachineSet) (bool, error) {
+	allDeleted := true
+	for _, ms := range machineSets {
+		machinesGone, remaining, err := machineMgr.CheckMachinesDeleted(ctx, ms.Name)
+		if err != nil {
+			return false, fmt.Errorf("checking machine deletion for %q: %w", ms.Name, err)
+		}
+		if !machinesGone {
+			log.V(1).Info("old machines still present", "machineSet", ms.Name, "remaining", remaining)
+			allDeleted = false
+			continue
+		}
+		nodesGone, nodeRemaining, err := machineMgr.CheckNodesDeletedForMachines(ctx, ms.Name)
+		if err != nil {
+			return false, fmt.Errorf("checking node deletion for %q: %w", ms.Name, err)
+		}
+		if !nodesGone {
+			log.V(1).Info("old nodes still present", "machineSet", ms.Name, "remaining", nodeRemaining)
+			allDeleted = false
+		}
+	}
+	return allDeleted, nil
 }
 
 // ensureSourceCleaned removes the source vCenter from all cluster configuration
@@ -1405,7 +1489,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		if err := r.permissionReader().Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
 			return err
 		}
-		hasChanges := mergeStatusConditions(ctx, migration, latest, baseStatus)
+		hasChanges := clearRecoveredMappingRejection(migration, latest, baseStatus)
+		if mergeStatusConditions(ctx, migration, latest, baseStatus) {
+			hasChanges = true
+		}
 		// Apply only progress deltas computed for the current resource
 		// generation, matching the generation protection used for conditions.
 		if migration.Generation == latest.Generation {
@@ -1421,16 +1508,30 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			hasChanges = true
 		}
 		ready := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
-		// Bind completion atomically to the spec that this reconcile actually completed.
-		if migration.Generation == latest.Generation && reflect.DeepEqual(migration.Spec, latest.Spec) &&
-			ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == latest.Generation && migration.Status.CompletionTime != nil {
-			hash, err := completionSpecHash(migration.Spec)
-			if err != nil {
-				return err
-			}
-			if latest.Status.CompletionSpecHash != hash || latest.Status.CompletionTime == nil {
-				latest.Status.CompletionTime = migration.Status.CompletionTime
-				latest.Status.CompletionSpecHash = hash
+		completed, err := mergeCompletionRecord(migration, latest, ready)
+		if err != nil {
+			return err
+		}
+		if completed {
+			hasChanges = true
+		}
+		// The preflight-resolved mapping is recorded once and never
+		// overwritten, like the timestamps above. Only publish the mapping for
+		// the generation (and object identity) it was validated against: a spec
+		// edit or delete/recreate can land between this reconcile's fetch and
+		// the status write, and publishing a stale mapping would lock the newer
+		// valid spec out via ensureMappingImmutable.
+		if len(migration.Status.FailureDomainMappings) > 0 && len(latest.Status.FailureDomainMappings) == 0 &&
+			migration.Generation == latest.Generation && migration.UID == latest.UID {
+			latest.Status.FailureDomainMappings = migration.Status.FailureDomainMappings
+			hasChanges = true
+		}
+		// Worker MachineSet names are append-only: merge this reconcile's
+		// newly recorded names into latest so they persist before cleanup can
+		// delete the source MachineSets they were derived from.
+		for _, name := range migration.Status.WorkerMachineSetNames {
+			if !slices.Contains(latest.Status.WorkerMachineSetNames, name) {
+				latest.Status.WorkerMachineSetNames = append(latest.Status.WorkerMachineSetNames, name)
 				hasChanges = true
 			}
 		}
@@ -1458,6 +1559,26 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		return fmt.Errorf("updating migration status: %w", err)
 	}
 	return nil
+}
+
+// mergeCompletionRecord binds completion atomically to the spec that this
+// reconcile actually completed, recording CompletionTime only when latest has
+// not already recorded the same spec hash.
+func mergeCompletionRecord(migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration, ready *metav1.Condition) (bool, error) {
+	if migration.Generation != latest.Generation || !reflect.DeepEqual(migration.Spec, latest.Spec) ||
+		ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != latest.Generation || migration.Status.CompletionTime == nil {
+		return false, nil
+	}
+	hash, err := completionSpecHash(migration.Spec)
+	if err != nil {
+		return false, err
+	}
+	if latest.Status.CompletionSpecHash != hash || latest.Status.CompletionTime == nil {
+		latest.Status.CompletionTime = migration.Status.CompletionTime
+		latest.Status.CompletionSpecHash = hash
+		return true, nil
+	}
+	return false, nil
 }
 
 // mergeStatusConditions applies only changed, current-generation conditions without downgrading committed success.
@@ -1519,29 +1640,38 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateWorkloadProgress(
 
 	var targetTotal, targetReady, targetNodesReady int32
 	var hasTargetErrors bool
+	msList, listErr := machineMgr.ListMachineSets(ctx)
+	if listErr != nil {
+		log.V(2).Info("failed listing machinesets for progress", "err", listErr)
+	}
 	for i := range migration.Spec.FailureDomains {
-		msName := workerMachineSetName(infraID, migration.Spec.FailureDomains[i].Name)
-		if ms, err := machineMgr.GetMachineSet(ctx, msName); err == nil && ms.Spec.Replicas != nil {
-			targetTotal += *ms.Spec.Replicas
-		} else if err != nil {
-			log.V(2).Info("failed getting machineset for progress", "machineset", msName, "err", err)
-		}
-		_, ready, total, err := machineMgr.CheckMachinesReady(ctx, msName)
-		if err == nil {
-			targetReady += ready
-			if targetTotal == 0 {
-				targetTotal += total
+		base := workerMachineSetName(infraID, migration.Spec.FailureDomains[i].Name)
+		// Suffixed copies (base-2, base-3, ...) are counted too: a failure
+		// domain that received multiple source MachineSets reports the sum of
+		// all its MachineSets.
+		for _, msName := range workerMachineSetNamesForBase(msList, base) {
+			if ms, err := machineMgr.GetMachineSet(ctx, msName); err == nil && ms.Spec.Replicas != nil {
+				targetTotal += *ms.Spec.Replicas
+			} else if err != nil {
+				log.V(2).Info("failed getting machineset for progress", "machineset", msName, "err", err)
 			}
-		} else {
-			hasTargetErrors = true
-			log.V(2).Info("failed checking machines ready for progress", "machineset", msName, "err", err)
-		}
-		_, nodeReady, _, err := machineMgr.CheckNodesReady(ctx, msName)
-		if err == nil {
-			targetNodesReady += nodeReady
-		} else {
-			hasTargetErrors = true
-			log.V(2).Info("failed checking nodes ready for progress", "machineset", msName, "err", err)
+			_, ready, total, err := machineMgr.CheckMachinesReady(ctx, msName)
+			if err == nil {
+				targetReady += ready
+				if targetTotal == 0 {
+					targetTotal += total
+				}
+			} else {
+				hasTargetErrors = true
+				log.V(2).Info("failed checking machines ready for progress", "machineset", msName, "err", err)
+			}
+			_, nodeReady, _, err := machineMgr.CheckNodesReady(ctx, msName)
+			if err == nil {
+				targetNodesReady += nodeReady
+			} else {
+				hasTargetErrors = true
+				log.V(2).Info("failed checking nodes ready for progress", "machineset", msName, "err", err)
+			}
 		}
 	}
 	if !hasTargetErrors || progress.Workers.TargetMachinesTotal == 0 {
@@ -1604,6 +1734,17 @@ func failureDomainNames(fds []configv1.VSpherePlatformFailureDomainSpec) []strin
 	return names
 }
 
+// findFailureDomainByName returns the failure domain with the given name, or
+// nil when absent.
+func findFailureDomainByName(fds []configv1.VSpherePlatformFailureDomainSpec, name string) *configv1.VSpherePlatformFailureDomainSpec {
+	for i := range fds {
+		if fds[i].Name == name {
+			return &fds[i]
+		}
+	}
+	return nil
+}
+
 // sanitizeRFC1123 converts s to a valid RFC 1123 subdomain label by lower-casing,
 // replacing non-alphanumeric characters with hyphens, collapsing runs of hyphens,
 // and trimming leading/trailing hyphens.
@@ -1621,12 +1762,30 @@ func sanitizeRFC1123(name string) string {
 	return strings.Trim(name, "-")
 }
 
+// maxGeneratedMachineSetNameLen is the Kubernetes label value limit that
+// generated MachineSet names must respect (they are reused as selector and
+// template label values).
+const maxGeneratedMachineSetNameLen = 63
+
+// generatedMachineSetNameSuffixReserve keeps room in every generated base
+// name for the numeric copy suffix (-2 .. -999) appended when one destination
+// failure domain receives multiple copied source MachineSets.
+const generatedMachineSetNameSuffixReserve = 4
+
+// workerMachineSetName returns the base name for the worker MachineSet copied
+// into the destination failure domain fdName, truncated so suffixed copies
+// (base-2, ...) stay within maxGeneratedMachineSetNameLen.
 func workerMachineSetName(infraID, fdName string) string {
 	sanitized := sanitizeRFC1123(fdName)
 	if sanitized == "" {
 		sanitized = "default"
 	}
-	return fmt.Sprintf("%s-worker-%s", infraID, sanitized)
+	name := fmt.Sprintf("%s-worker-%s", infraID, sanitized)
+	maxLen := maxGeneratedMachineSetNameLen - generatedMachineSetNameSuffixReserve
+	if len(name) > maxLen {
+		name = strings.Trim(name[:maxLen], "-")
+	}
+	return name
 }
 
 // workerReadinessStatus holds aggregate readiness for target worker MachineSets.
@@ -1644,30 +1803,274 @@ type workerReadinessStatus struct {
 func checkWorkerReadiness(ctx context.Context, machineMgr *openshift.MachineManager, fds []configv1.VSpherePlatformFailureDomainSpec, infraID string) (workerReadinessStatus, error) {
 	log := klog.FromContext(ctx)
 	status := workerReadinessStatus{Ready: true}
+	// Suffixed copies (base-2, base-3, ...) must be checked too: when a failure
+	// domain receives multiple source MachineSets, scaling the source down
+	// before every copy is ready would lose capacity.
+	msList, err := machineMgr.ListMachineSets(ctx)
+	if err != nil {
+		return workerReadinessStatus{}, fmt.Errorf("listing machinesets: %w", err)
+	}
 	for i := range fds {
-		msName := workerMachineSetName(infraID, fds[i].Name)
-		machinesOK, machineReadyCount, machineTotalCount, merr := machineMgr.CheckMachinesReady(ctx, msName)
-		if merr != nil {
-			return workerReadinessStatus{}, fmt.Errorf("checking machines for %q: %w", msName, merr)
-		}
-		status.MachinesReady += machineReadyCount
-		status.MachinesTotal += machineTotalCount
-		if !machinesOK {
-			log.V(1).Info("machines not ready", "machineSet", msName, "ready", machineReadyCount, "total", machineTotalCount)
-			status.Ready = false
-		}
-		nodesOK, nodeReadyCount, nodeTotalCount, nerr := machineMgr.CheckNodesReady(ctx, msName)
-		if nerr != nil {
-			return workerReadinessStatus{}, fmt.Errorf("checking nodes for %q: %w", msName, nerr)
-		}
-		status.NodesReady += nodeReadyCount
-		status.NodesTotal += nodeTotalCount
-		if !nodesOK {
-			log.V(1).Info("nodes not ready", "machineSet", msName, "ready", nodeReadyCount, "total", nodeTotalCount)
-			status.Ready = false
+		base := workerMachineSetName(infraID, fds[i].Name)
+		for _, msName := range workerMachineSetNamesForBase(msList, base) {
+			ms, err := machineMgr.GetMachineSet(ctx, msName)
+			if err != nil {
+				return workerReadinessStatus{}, fmt.Errorf("getting machineset %q: %w", msName, err)
+			}
+			desired := int32(1)
+			if ms.Spec.Replicas != nil {
+				desired = *ms.Spec.Replicas
+			}
+			if desired == 0 {
+				continue
+			}
+			machinesOK, machineReadyCount, machineTotalCount, merr := machineMgr.CheckMachinesReady(ctx, msName)
+			if merr != nil {
+				return workerReadinessStatus{}, fmt.Errorf("checking machines for %q: %w", msName, merr)
+			}
+			status.MachinesReady += machineReadyCount
+			status.MachinesTotal += machineTotalCount
+			if !machinesOK || machineReadyCount < desired {
+				log.V(1).Info("machines not ready", "machineSet", msName, "ready", machineReadyCount, "total", machineTotalCount)
+				status.Ready = false
+			}
+			nodesOK, nodeReadyCount, nodeTotalCount, nerr := machineMgr.CheckNodesReady(ctx, msName)
+			if nerr != nil {
+				return workerReadinessStatus{}, fmt.Errorf("checking nodes for %q: %w", msName, nerr)
+			}
+			status.NodesReady += nodeReadyCount
+			status.NodesTotal += nodeTotalCount
+			if !nodesOK || nodeReadyCount < desired {
+				log.V(1).Info("nodes not ready", "machineSet", msName, "ready", nodeReadyCount, "total", nodeTotalCount)
+				status.Ready = false
+			}
 		}
 	}
 	return status, nil
+}
+
+func (r *VmwareCloudFoundationMigrationReconciler) checkMappingForReconcile(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (bool, error) {
+	// Reject edits to the failure domain mapping recorded at preflight before
+	// any phase work runs.
+	if err := r.ensureMappingImmutable(migration); err != nil {
+		klog.FromContext(ctx).Error(err, "failure domain mappings changed after preflight")
+		// Event fires once per drift, not on every reconcile while drifted.
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
+		alreadyRecorded := cond != nil &&
+			cond.Status == metav1.ConditionFalse &&
+			cond.Reason == migrationv1alpha1.ReasonFailed &&
+			cond.ObservedGeneration == migration.Generation
+		if !alreadyRecorded {
+			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonFailed, migrationv1alpha1.ReasonFailed, "%s", err)
+		}
+		r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, err.Error())
+		if statusErr := r.updateStatus(ctx, migration, baseStatus); statusErr != nil {
+			return true, statusErr
+		}
+		return true, nil
+	}
+
+	if cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted); cond != nil &&
+		cond.Status == metav1.ConditionFalse && cond.Reason == migrationv1alpha1.ReasonFailed {
+		apimeta.RemoveStatusCondition(&migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
+	}
+
+	return false, nil
+}
+
+func targetMachineSetsExist(ctx context.Context, machineMgr *openshift.MachineManager, infraID string, mappings []migrationv1alpha1.FailureDomainMapping, infraFDs, destFDs []configv1.VSpherePlatformFailureDomainSpec, recorded []string) (bool, error) {
+	allTargetMSExist := true
+	for mi := range mappings {
+		fd := findFailureDomainByName(destFDs, mappings[mi].Destination)
+		if fd == nil {
+			return false, fmt.Errorf("resolving destination failure domain %q for mapping from %q", mappings[mi].Destination, mappings[mi].Source)
+		}
+		base := workerMachineSetName(infraID, fd.Name)
+		// Recorded names are persisted at creation time, so they still carry
+		// the full set of expected destination MachineSets after the source
+		// failure domain and its MachineSets are deleted late in the migration.
+		targetNames := recordedWorkerMachineSetNames(recorded, base)
+		sourceFD := findFailureDomainByName(infraFDs, mappings[mi].Source)
+		if sourceFD != nil {
+			sourceMSList, err := machineMgr.GetMachineSetsByFailureDomain(ctx, sourceFD.Server, sourceFD)
+			if err != nil {
+				return false, fmt.Errorf("getting source MachineSets for failure domain %q: %w", mappings[mi].Source, err)
+			}
+			if len(sourceMSList) > 0 {
+				// Same deterministic order as the creation loop below, keeping
+				// the suffixed names (-2, -3, ...) stable across reconciles.
+				sort.Slice(sourceMSList, func(i, j int) bool { return sourceMSList[i].Name < sourceMSList[j].Name })
+				// Merge the names derived from the current source MachineSets with
+				// the recorded ones: the source could have been scaled or partially
+				// cleaned up since creation, dropping destination MachineSets that
+				// were already created and must still be checked.
+				derived := make([]string, 0, len(sourceMSList))
+				for si := range sourceMSList {
+					derived = append(derived, suffixedWorkerMachineSetName(base, si))
+				}
+				for _, name := range derived {
+					if !slices.Contains(targetNames, name) {
+						targetNames = append(targetNames, name)
+					}
+				}
+				sort.Strings(targetNames)
+			} else if len(targetNames) == 0 {
+				// No source MachineSets and nothing recorded: the mapping was
+				// originally empty and stays intentionally empty.
+				continue
+			}
+		} else if len(targetNames) == 0 {
+			// Source failure domain already removed and nothing recorded
+			// (in-flight migration predating name recording): base only.
+			targetNames = []string{base}
+		}
+		for _, name := range targetNames {
+			if _, err := machineMgr.GetMachineSet(ctx, name); err != nil {
+				allTargetMSExist = false
+				break
+			}
+		}
+		if !allTargetMSExist {
+			break
+		}
+	}
+	return allTargetMSExist, nil
+}
+
+func (r *VmwareCloudFoundationMigrationReconciler) createMappedWorkerMachineSets(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, machineMgr *openshift.MachineManager, infraID string, mappings []migrationv1alpha1.FailureDomainMapping, infraFDs []configv1.VSpherePlatformFailureDomainSpec) (ctrl.Result, error) {
+	log := klog.FromContext(ctx)
+	condType := migrationv1alpha1.ConditionWorkloadMigrated
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Creating new worker MachineSets")
+	createdAny := false
+	// A source MachineSet must feed exactly one destination failure domain;
+	// ambiguous source topology would otherwise duplicate its replicas.
+	claimedSources := make(map[string]bool)
+	for mi := range mappings {
+		fd := findFailureDomainByName(migration.Spec.FailureDomains, mappings[mi].Destination)
+		if fd == nil {
+			return ctrl.Result{}, fmt.Errorf("resolving destination failure domain %q for mapping from %q", mappings[mi].Destination, mappings[mi].Source)
+		}
+		sourceFD := findFailureDomainByName(infraFDs, mappings[mi].Source)
+		if sourceFD == nil {
+			return ctrl.Result{}, fmt.Errorf("resolving source failure domain %q for mapping to %q", mappings[mi].Source, mappings[mi].Destination)
+		}
+		sourceMSList, err := machineMgr.GetMachineSetsByFailureDomain(ctx, sourceFD.Server, sourceFD)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("getting source MachineSets for failure domain %q: %w", mappings[mi].Source, err)
+		}
+		if len(sourceMSList) == 0 {
+			continue
+		}
+		// Deterministic order keeps the suffixed names (-2, -3, ...) stable
+		// across reconciles.
+		sort.Slice(sourceMSList, func(i, j int) bool { return sourceMSList[i].Name < sourceMSList[j].Name })
+		base := workerMachineSetName(infraID, fd.Name)
+		for si, sourceMS := range sourceMSList {
+			if claimedSources[sourceMS.Name] {
+				return ctrl.Result{}, fmt.Errorf("source MachineSet %q assigned to multiple failure domains", sourceMS.Name)
+			}
+			claimedSources[sourceMS.Name] = true
+			msName := suffixedWorkerMachineSetName(base, si)
+			// Persist every generated name before cleanup can delete the source
+			// MachineSets it was derived from, so retries after cleanup still
+			// require these destination MachineSets to exist and be ready.
+			if !slices.Contains(migration.Status.WorkerMachineSetNames, msName) {
+				migration.Status.WorkerMachineSetNames = append(migration.Status.WorkerMachineSetNames, msName)
+			}
+			if existing, err := machineMgr.GetMachineSet(ctx, msName); err == nil {
+				// Idempotent only when the existing MachineSet already targets
+				// this failure domain's vCenter; anything else is a name
+				// collision preflight should have caught (so the rename remedy
+				// needs the error, not a silent skip).
+				providerSpec, err := openshift.ExtractVSphereProviderSpec(existing)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("extracting provider spec from machineset %q: %w", msName, err)
+				}
+				if providerSpec.Workspace == nil || providerSpec.Workspace.Server != fd.Server {
+					return ctrl.Result{}, fmt.Errorf("generated MachineSet name %q collides with existing MachineSet; rename the destination failure domain", msName)
+				}
+				log.V(1).Info("worker MachineSet already exists, skipping", "name", msName)
+				continue
+			}
+			// One destination MachineSet per source MachineSet so heterogeneous
+			// provider specs (VM sizes, disks) are preserved; the template and
+			// target topology always come from the destination failure domain.
+			// Replicas are copied exactly, with no minimum-1 floor: a source
+			// failure domain deliberately scaled to zero stays at zero. A nil
+			// value defaults to 1, matching MAPI's defaulting.
+			replicas := int32(1)
+			if sourceMS.Spec.Replicas != nil {
+				replicas = *sourceMS.Spec.Replicas
+			}
+			if _, err := machineMgr.CreateWorkerMachineSet(ctx, msName, replicas, fd, sourceMS, infraID); err != nil {
+				return ctrl.Result{}, fmt.Errorf("creating worker MachineSet %q: %w", msName, err)
+			}
+			createdAny = true
+			log.V(1).Info("created worker MachineSet", "name", msName, "replicas", replicas, "sourceMachineSet", sourceMS.Name)
+		}
+	}
+	if createdAny {
+		r.Recorder.Eventf(migration, nil, "Normal", "WorkersCreated", "WorkersCreated", "New worker MachineSets created on target vCenter")
+	}
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Workers created, waiting for machines ready")
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func clearRecoveredMappingRejection(migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) bool {
+	// Persist recovered mapping rejections without deleting a concurrent update.
+	accepted := migrationv1alpha1.ConditionAccepted
+	previous := apimeta.FindStatusCondition(baseStatus.Conditions, accepted)
+	current := apimeta.FindStatusCondition(latest.Status.Conditions, accepted)
+	if migration.Generation == latest.Generation && previous != nil && current != nil &&
+		previous.Status == metav1.ConditionFalse && previous.Reason == migrationv1alpha1.ReasonFailed &&
+		apimeta.FindStatusCondition(migration.Status.Conditions, accepted) == nil && reflect.DeepEqual(previous, current) {
+		apimeta.RemoveStatusCondition(&latest.Status.Conditions, accepted)
+		return true
+	}
+	return false
+}
+
+// workerReadinessFailureDomains omits empty source mappings unless destination
+// MachineSets already exist and still need readiness checks.
+func workerReadinessFailureDomains(ctx context.Context, machineMgr *openshift.MachineManager, infraID string, mappings []migrationv1alpha1.FailureDomainMapping, sourceFDs, destFDs []configv1.VSpherePlatformFailureDomainSpec, recorded []string) ([]configv1.VSpherePlatformFailureDomainSpec, error) {
+	sets, err := machineMgr.ListMachineSets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing worker machinesets: %w", err)
+	}
+	result := make([]configv1.VSpherePlatformFailureDomainSpec, 0, len(destFDs))
+	for _, mapping := range mappings {
+		fd := findFailureDomainByName(destFDs, mapping.Destination)
+		if fd == nil {
+			return nil, fmt.Errorf("resolving destination failure domain %q", mapping.Destination)
+		}
+		source := findFailureDomainByName(sourceFDs, mapping.Source)
+		if source != nil {
+			sources, err := machineMgr.GetMachineSetsByFailureDomain(ctx, source.Server, source)
+			if err != nil {
+				return nil, fmt.Errorf("listing source machinesets for %q: %w", source.Name, err)
+			}
+			if len(sources) == 0 {
+				base := workerMachineSetName(infraID, fd.Name)
+				// Recorded names mean the mapping was not originally empty: its
+				// source MachineSets were cleaned up, so the destination side
+				// must still be checked for readiness.
+				if len(recordedWorkerMachineSetNames(recorded, base)) == 0 {
+					found := false
+					for _, ms := range sets {
+						if ms.Name == base || isSuffixedMachineSetName(ms.Name, base) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						continue
+					}
+				}
+			}
+		}
+		result = append(result, *fd)
+	}
+	return result, nil
 }
 
 type stallDetailPart struct {
