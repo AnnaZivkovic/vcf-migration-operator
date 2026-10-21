@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -384,6 +386,98 @@ func TestGetMachineSetsByVCenter_emptyServerCausesNoMachineSetUpdates(t *testing
 		if got.Spec.Replicas == nil || *got.Spec.Replicas != 3 {
 			t.Fatalf("machineset %q replicas = %v, want 3 (unchanged)", name, got.Spec.Replicas)
 		}
+	}
+}
+
+func TestListMachineSets(t *testing.T) {
+	ctx := context.Background()
+	msA := newTestMachineSetForVCenter("source-worker", "source.example.com", 3)
+	msB := newTestMachineSetForVCenter("target-worker", "target.example.com", 1)
+	mgr := NewMachineManager(fakekube.NewClientset(), fakemachineclient.NewClientset(msA, msB), nil)
+
+	got, err := mgr.ListMachineSets(ctx)
+	if err != nil {
+		t.Fatalf("ListMachineSets: %v", err)
+	}
+	gotNames := make([]string, 0, len(got))
+	for _, ms := range got {
+		gotNames = append(gotNames, ms.Name)
+	}
+	sort.Strings(gotNames)
+	if !slices.Equal(gotNames, []string{"source-worker", "target-worker"}) {
+		t.Fatalf("ListMachineSets = %v, want [source-worker target-worker]", gotNames)
+	}
+}
+
+func newTestMachineSetForFailureDomain(name, server, datacenter, resourcePool string, replicas int32) *machinev1beta1.MachineSet {
+	ms := newTestMachineSet(name, replicas)
+	raw := []byte(fmt.Sprintf(
+		`{"kind":"VSphereMachineProviderSpec","apiVersion":"machine.openshift.io/v1beta1","workspace":{"server":%q,"datacenter":%q,"resourcePool":%q}}`,
+		server, datacenter, resourcePool,
+	))
+	ms.Spec.Template.Spec.ProviderSpec.Value = &runtime.RawExtension{Raw: raw}
+	return ms
+}
+
+func TestGetMachineSetsByFailureDomain(t *testing.T) {
+	ctx := context.Background()
+	msA := newTestMachineSetForFailureDomain("source-worker-a", "source.example.com", "dc1", "rp1", 3)
+	msB := newTestMachineSetForFailureDomain("source-worker-b", "source.example.com", "dc1", "rp2", 2)
+	msOtherDC := newTestMachineSetForFailureDomain("source-worker-c", "source.example.com", "dc2", "rp1", 1)
+	msOtherServer := newTestMachineSetForFailureDomain("target-worker", "target.example.com", "dc1", "rp1", 1)
+
+	tests := []struct {
+		name      string
+		fd        *configv1.VSpherePlatformFailureDomainSpec
+		wantNames []string
+	}{
+		{
+			name: "matches datacenter and resource pool",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1", ResourcePool: "rp1"},
+			},
+			wantNames: []string{"source-worker-a"},
+		},
+		{
+			name: "empty resource pool in FD matches by datacenter",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1"},
+			},
+			wantNames: []string{"source-worker-a", "source-worker-b"},
+		},
+		{
+			name: "no match returns empty result without error",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc3", ResourcePool: "rp1"},
+			},
+			wantNames: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machineClient := fakemachineclient.NewClientset(msA, msB, msOtherDC, msOtherServer)
+			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+			got, err := mgr.GetMachineSetsByFailureDomain(ctx, tt.fd.Server, tt.fd)
+			if err != nil {
+				t.Fatalf("GetMachineSetsByFailureDomain: %v", err)
+			}
+			var gotNames []string
+			for _, ms := range got {
+				gotNames = append(gotNames, ms.Name)
+			}
+			sort.Strings(gotNames)
+			sort.Strings(tt.wantNames)
+			if !slices.Equal(gotNames, tt.wantNames) {
+				t.Fatalf("GetMachineSetsByFailureDomain(%q) = %v, want %v", tt.fd.Name, gotNames, tt.wantNames)
+			}
+		})
 	}
 }
 
@@ -1068,9 +1162,9 @@ func TestUpdateMachineSetProviderSpecNetworks(t *testing.T) {
 				t.Fatalf("updateMachineSetProviderSpec: %v", err)
 			}
 
-			providerSpec, err := extractVSphereProviderSpec(ms)
+			providerSpec, err := ExtractVSphereProviderSpec(ms)
 			if err != nil {
-				t.Fatalf("extractVSphereProviderSpec: %v", err)
+				t.Fatalf("ExtractVSphereProviderSpec: %v", err)
 			}
 			if len(providerSpec.Network.Devices) != 1 {
 				t.Fatalf("network devices = %d, want 1", len(providerSpec.Network.Devices))

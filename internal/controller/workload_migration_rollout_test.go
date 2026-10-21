@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/events"
@@ -30,11 +32,15 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // machinePhaseRunning is the machinev1beta1 Machine Phase value for a running
 // machine; the upstream API package does not export a constant for it.
 const machinePhaseRunning = "Running"
+
+// completedMessage marks earlier-phase conditions as done in test fixtures.
+const completedMessage = "completed"
 
 func TestEnsureWorkloadMigratedRolloutAndScaleDown(t *testing.T) {
 	ctx := context.Background()
@@ -119,6 +125,21 @@ func TestEnsureWorkloadMigratedRolloutAndScaleDown(t *testing.T) {
 				if !strings.Contains(cond.Message, "Old workers scaled down") {
 					t.Fatalf("workload condition message = %q, want substring %q", cond.Message, "Old workers scaled down")
 				}
+			},
+		},
+		{
+			// nil replicas default to 1 in MAPI: such a MachineSet runs
+			// capacity and must be scaled down like any positive one.
+			name: "scales source machinesets with nil replicas down to zero",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newCPMSForRollout(true, true),
+				newNilReplicaSourceMachineSetForRollout("source-worker-a"),
+			},
+			wantRequeue: 30 * time.Second,
+			assertions: func(t *testing.T, resultReconciler *VmwareCloudFoundationMigrationReconciler, _ *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				t.Helper()
+				assertMachineSetReplicas(t, ctx, resultReconciler, "source-worker-a", 0)
 			},
 		},
 		{
@@ -224,6 +245,30 @@ func TestEnsureWorkloadMigratedRolloutAndScaleDown(t *testing.T) {
 					Name:       migrationv1alpha1.SingletonName,
 					Generation: 1,
 				},
+				// Spec failure domains are always populated by the time the real
+				// flow reaches Step 6; name recovery resolves the destination
+				// failure domain from them.
+				Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+					FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+						Name:   "target-fd-1",
+						Server: "target.example.com",
+						Topology: configv1.VSpherePlatformTopology{
+							Template:       "/dc1/vm/target-template",
+							Datacenter:     "dc1",
+							Datastore:      "ds1",
+							ResourcePool:   "rp1",
+							ComputeCluster: "cl1",
+						},
+					}},
+				},
+				// The coverage gate before scale-down requires the preflight mapping
+				// and the worker MachineSets recorded at creation.
+				Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+					FailureDomainMappings: []migrationv1alpha1.FailureDomainMapping{
+						{Source: "source-fd-1", Destination: "target-fd-1"},
+					},
+					WorkerMachineSetNames: []string{workerMachineSetName("test-infra", "target-fd-1")},
+				},
 			}
 			if tt.setup != nil {
 				tt.setup(t, reconciler.MachineClient.(*fakemachineclient.Clientset), migration)
@@ -310,6 +355,84 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 			},
 			wantRequeue: 30 * time.Second,
 			wantMessage: "Waiting for target workers (machines 1/2 ready, nodes 1/2 ready)",
+		},
+		{
+			// A failure domain that received multiple source MachineSets generates
+			// suffixed copies (base-2, ...); readiness must cover every copy or the
+			// source would be scaled down while a copy is still coming up.
+			name: "blocks readiness while a suffixed copy is not ready",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+				newReadyWorkerMachineForRollout(targetMSName),
+				newReadyNodeForRollout(rolloutReadyNodeName),
+				newTargetMachineSetForRollout(targetMSName+"-2", "target.example.com", 1),
+				&machinev1beta1.Machine{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      targetMSName + "-2-pending",
+						Namespace: openshift.MachineAPINamespace,
+						Labels: map[string]string{
+							"machine.openshift.io/cluster-api-machineset": targetMSName + "-2",
+						},
+					},
+					Status: machinev1beta1.MachineStatus{Phase: &provisioning},
+				},
+				newCPMSUpdatedForRollout([]string{"target-fd-1"}, false),
+				newSourceMachineSetForRolloutNamed("source-worker-a", 1),
+				newSourceMachineSetForRolloutNamed("source-worker-b", 1),
+			},
+			// 30s (worker wait), not the 15s rollout requeue: the suffixed copy
+			// must gate the migration before any source scale-down.
+			wantRequeue: 30 * time.Second,
+			wantMessage: "Waiting for target workers (machines 1/2 ready, nodes 1/2 ready)",
+		},
+		{
+			// The base MachineSet alone must not satisfy the creation gate: a
+			// missing suffixed copy (e.g. after a transient creation error) must
+			// be healed by the idempotent creation loop, never skipped in favor
+			// of proceeding toward source scale-down.
+			name: "recreates a missing suffixed copy",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+				newReadyWorkerMachineForRollout(targetMSName),
+				newReadyNodeForRollout(rolloutReadyNodeName),
+				newCPMSUpdatedForRollout([]string{"target-fd-1"}, false),
+				newSourceMachineSetForRolloutNamed("source-worker-a", 1),
+				newSourceMachineSetForRolloutNamed("source-worker-b", 2),
+			},
+			wantRequeue: 30 * time.Second,
+			wantMessage: "Workers created, waiting for machines ready",
+			assertions: func(t *testing.T, reconciler *VmwareCloudFoundationMigrationReconciler) {
+				t.Helper()
+				ms, err := reconciler.MachineClient.MachineV1beta1().MachineSets(openshift.MachineAPINamespace).Get(ctx, targetMSName+"-2", metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("getting recreated suffixed machineset %q: %v", targetMSName+"-2", err)
+				}
+				if ms.Spec.Replicas == nil || *ms.Spec.Replicas != 2 {
+					t.Fatalf("machineset %q replicas = %v, want 2 (copied from source-worker-b)", targetMSName+"-2", ms.Spec.Replicas)
+				}
+			},
+		},
+		{
+			// A nil-replica source MachineSet runs one replica by MAPI default;
+			// the destination copy must not be created at zero.
+			name: "copies nil source replicas as one",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+				newReadyWorkerMachineForRollout(targetMSName),
+				newReadyNodeForRollout(rolloutReadyNodeName),
+				newCPMSUpdatedForRollout([]string{"target-fd-1"}, false),
+				newSourceMachineSetForRolloutNamed("source-worker-a", 1),
+				newNilReplicaSourceMachineSetForRollout("source-worker-b"),
+			},
+			wantRequeue: 30 * time.Second,
+			wantMessage: "Workers created, waiting for machines ready",
+			assertions: func(t *testing.T, reconciler *VmwareCloudFoundationMigrationReconciler) {
+				t.Helper()
+				assertMachineSetReplicas(t, ctx, reconciler, targetMSName+"-2", 1)
+			},
 		},
 		{
 			name: "stays in worker phase when target machinesets missing",
@@ -413,6 +536,13 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 						},
 					}},
 				},
+				Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+					// The effective mapping recorded at preflight drives worker
+					// MachineSet creation.
+					FailureDomainMappings: []migrationv1alpha1.FailureDomainMapping{
+						{Source: "source-fd-1", Destination: "target-fd-1"},
+					},
+				},
 			}
 
 			result, err := reconciler.ensureWorkloadMigrated(ctx, migration)
@@ -493,11 +623,15 @@ func TestReconcileWorkloadMigratedFailedWorkerMachine(t *testing.T) {
 		},
 		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
 			StartTime: &start,
+			FailureDomainMappings: []migrationv1alpha1.FailureDomainMapping{
+				{Source: "source-fd-1", Destination: "target-fd-1"},
+			},
 		},
 	}
+	// A reverted mapping edit must not leave the old rejection persisted.
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, "previous mapping drift")
 	// Earlier phases are complete so Reconcile dispatches straight to
 	// ensureWorkloadMigrated.
-	completedMessage := "completed"
 	reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
 	reconciler.setCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
 	reconciler.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
@@ -523,6 +657,10 @@ func TestReconcileWorkloadMigratedFailedWorkerMachine(t *testing.T) {
 	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
 		t.Fatalf("getting persisted migration: %v", err)
 	}
+	if accepted := apimeta.FindStatusCondition(persisted.Status.Conditions, migrationv1alpha1.ConditionAccepted); accepted != nil &&
+		accepted.Status == metav1.ConditionFalse && accepted.Reason == migrationv1alpha1.ReasonFailed {
+		t.Fatalf("stale mapping rejection persisted: %+v", accepted)
+	}
 	cond := apimeta.FindStatusCondition(persisted.Status.Conditions, migrationv1alpha1.ConditionWorkloadMigrated)
 	if cond == nil {
 		t.Fatalf("condition %q not found on persisted migration", migrationv1alpha1.ConditionWorkloadMigrated)
@@ -535,6 +673,205 @@ func TestReconcileWorkloadMigratedFailedWorkerMachine(t *testing.T) {
 	}
 	if !strings.Contains(cond.Message, "is Failed") {
 		t.Fatalf("condition message = %q, want containing %q", cond.Message, "is Failed")
+	}
+}
+
+// TestScaleDownStopsOnUnmappedSourceMachineSet is a controller-level
+// regression test for the Step 6 coverage gate: a source-vCenter MachineSet
+// with running replicas placed in a datacenter covered by no source failure
+// domain must stop the migration before any source MachineSet is scaled
+// down, and Reconcile must persist ConditionWorkloadMigrated False. The
+// per-case gate behavior is covered by TestValidateSourceMachineSetCoverage.
+func TestScaleDownStopsOnUnmappedSourceMachineSet(t *testing.T) {
+	ctx := context.Background()
+	targetMSName := workerMachineSetName("test-infra", "target-fd-1")
+	const outOfTopologyMSName = "source-worker-other"
+
+	reconciler := newRolloutReconciler(t, []runtime.Object{
+		newInfrastructureForRollout(),
+		newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+		newReadyWorkerMachineForRollout(targetMSName),
+		newReadyNodeForRollout(rolloutReadyNodeName),
+		newCPMSUpdatedForRollout([]string{"target-fd-1"}, true),
+		newSourceMachineSetForRollout(1),
+		newOutOfTopologySourceMachineSetForRollout(outOfTopologyMSName, 1),
+	})
+
+	start := metav1.Now()
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       migrationv1alpha1.SingletonName,
+			Namespace:  migrationv1alpha1.SingletonNamespace,
+			Generation: 1,
+			// The retention finalizer is normally added by the first reconcile;
+			// pre-setting it keeps this test focused on the workload phase.
+			Finalizers: []string{migrationv1alpha1.FinalizerName},
+		},
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			State: migrationv1alpha1.MigrationStateRunning,
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+				Name:   "target-fd-1",
+				Server: "target.example.com",
+				Topology: configv1.VSpherePlatformTopology{
+					Template:       "/dc1/vm/target-template",
+					Datacenter:     "dc1",
+					Datastore:      "ds1",
+					ResourcePool:   "rp1",
+					ComputeCluster: "cl1",
+				},
+			}},
+		},
+		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+			StartTime: &start,
+			FailureDomainMappings: []migrationv1alpha1.FailureDomainMapping{
+				{Source: "source-fd-1", Destination: "target-fd-1"},
+			},
+			// Recorded when the target worker MachineSets were created: the
+			// mapped source MachineSet has a verified replacement.
+			WorkerMachineSetNames: []string{targetMSName},
+		},
+	}
+	// Earlier phases are complete so Reconcile dispatches straight to
+	// ensureWorkloadMigrated.
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+
+	scheme := runtime.NewScheme()
+	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("building scheme: %v", err)
+	}
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(migration).
+		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
+		Build()
+	reconciler.Client = fakeClient
+	reconciler.Scheme = scheme
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)})
+	if err == nil || !strings.Contains(err.Error(), "does not match any source failure domain") {
+		t.Fatalf("Reconcile() error = %v, want error containing %q", err, "does not match any source failure domain")
+	}
+
+	persisted := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
+		t.Fatalf("getting persisted migration: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(persisted.Status.Conditions, migrationv1alpha1.ConditionWorkloadMigrated)
+	if cond == nil {
+		t.Fatalf("condition %q not found on persisted migration", migrationv1alpha1.ConditionWorkloadMigrated)
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Fatalf("condition status = %q, want %q", cond.Status, metav1.ConditionFalse)
+	}
+	if !strings.Contains(cond.Message, "does not match any source failure domain") {
+		t.Fatalf("condition message = %q, want containing %q", cond.Message, "does not match any source failure domain")
+	}
+
+	ms, err := reconciler.MachineClient.MachineV1beta1().MachineSets(openshift.MachineAPINamespace).Get(ctx, outOfTopologyMSName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting machineset %q: %v", outOfTopologyMSName, err)
+	}
+	if ms.Spec.Replicas == nil || *ms.Spec.Replicas != 1 {
+		t.Fatalf("machineset %q replicas = %v, want 1 (must not be scaled down)", outOfTopologyMSName, ms.Spec.Replicas)
+	}
+}
+
+// TestScaleDownRecoversUnrecordedDestinationMachineSetNames is a
+// controller-level regression test for the restart gap between worker
+// MachineSet creation and the updateStatus that records their names: the
+// destination MachineSets exist and are ready, but
+// status.workerMachineSetNames is empty (lost to a crash). Reconcile must
+// re-derive the names from the still-present source MachineSets, verify them,
+// record them, and proceed through Step 6 instead of failing the coverage
+// gate forever.
+func TestScaleDownRecoversUnrecordedDestinationMachineSetNames(t *testing.T) {
+	ctx := context.Background()
+	targetMSName := workerMachineSetName("test-infra", "target-fd-1")
+	const sourceMSA = "source-worker-a"
+	const sourceMSB = "source-worker-b"
+
+	reconciler := newRolloutReconciler(t, []runtime.Object{
+		newInfrastructureForRollout(),
+		newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+		newTargetMachineSetForRollout(targetMSName+"-2", "target.example.com", 1),
+		newReadyWorkerMachineForRollout(targetMSName),
+		newReadyWorkerMachineForRollout(targetMSName + "-2"),
+		newReadyNodeForRollout(rolloutReadyNodeName),
+		newCPMSUpdatedForRollout([]string{"target-fd-1"}, true),
+		newSourceMachineSetForRolloutNamed(sourceMSA, 1),
+		newSourceMachineSetForRolloutNamed(sourceMSB, 1),
+	})
+
+	start := metav1.Now()
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       migrationv1alpha1.SingletonName,
+			Namespace:  migrationv1alpha1.SingletonNamespace,
+			Generation: 1,
+			Finalizers: []string{migrationv1alpha1.FinalizerName},
+		},
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			State: migrationv1alpha1.MigrationStateRunning,
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+				Name:   "target-fd-1",
+				Server: "target.example.com",
+				Topology: configv1.VSpherePlatformTopology{
+					Template:       "/dc1/vm/target-template",
+					Datacenter:     "dc1",
+					Datastore:      "ds1",
+					ResourcePool:   "rp1",
+					ComputeCluster: "cl1",
+				},
+			}},
+		},
+		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+			StartTime: &start,
+			FailureDomainMappings: []migrationv1alpha1.FailureDomainMapping{
+				{Source: "source-fd-1", Destination: "target-fd-1"},
+			},
+			// Restart state: destination MachineSets exist, but the crash lost
+			// the recording of their names.
+			WorkerMachineSetNames: nil,
+		},
+	}
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+
+	scheme := runtime.NewScheme()
+	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("building scheme: %v", err)
+	}
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(migration).
+		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
+		Build()
+	reconciler.Client = fakeClient
+	reconciler.Scheme = scheme
+
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)}); err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil (recovered names must let scale-down proceed)", err)
+	}
+
+	for _, name := range []string{sourceMSA, sourceMSB} {
+		ms, err := reconciler.MachineClient.MachineV1beta1().MachineSets(openshift.MachineAPINamespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("getting machineset %q: %v", name, err)
+		}
+		if ms.Spec.Replicas == nil || *ms.Spec.Replicas != 0 {
+			t.Fatalf("machineset %q replicas = %v, want 0 (flow must proceed through Step 6)", name, ms.Spec.Replicas)
+		}
+	}
+
+	persisted := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
+		t.Fatalf("getting persisted migration: %v", err)
+	}
+	if want := []string{targetMSName, targetMSName + "-2"}; !slices.Equal(persisted.Status.WorkerMachineSetNames, want) {
+		t.Fatalf("persisted WorkerMachineSetNames = %v, want %v", persisted.Status.WorkerMachineSetNames, want)
 	}
 }
 
@@ -684,11 +1021,28 @@ func newInfrastructureForRollout() *configv1.Infrastructure {
 					VCenters: []configv1.VSpherePlatformVCenterSpec{
 						{Server: "source.example.com"},
 					},
+					FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
+						newSourceFailureDomainForRollout(),
+					},
 				},
 			},
 		},
 		Status: configv1.InfrastructureStatus{
 			InfrastructureName: "test-infra",
+		},
+	}
+}
+
+// newSourceFailureDomainForRollout describes the single source failure domain
+// whose topology matches the MachineSets built by newSourceMachineSetForRollout
+// and the mappings recorded in the rollout test migrations.
+func newSourceFailureDomainForRollout() configv1.VSpherePlatformFailureDomainSpec {
+	return configv1.VSpherePlatformFailureDomainSpec{
+		Name:   "source-fd-1",
+		Server: "source.example.com",
+		Topology: configv1.VSpherePlatformTopology{
+			Datacenter:   "dc-source",
+			ResourcePool: "rp-source-1",
 		},
 	}
 }
@@ -783,7 +1137,40 @@ func newCPMSUpdatedForRollout(fdNames []string, observed bool) *machinev1.Contro
 }
 
 func newSourceMachineSetForRollout(replicas int32) *machinev1beta1.MachineSet {
-	return newTargetMachineSetForRollout("source-worker-a", "source.example.com", replicas)
+	return newSourceMachineSetForRolloutNamed("source-worker-a", replicas)
+}
+
+// newSourceMachineSetForRolloutNamed builds a source MachineSet with the given
+// name in the source failure domain's datacenter and resource pool, so tests
+// can place multiple source MachineSets in one failure domain.
+func newSourceMachineSetForRolloutNamed(name string, replicas int32) *machinev1beta1.MachineSet {
+	ms := newTargetMachineSetForRollout(name, "source.example.com", replicas)
+	// The source MachineSet lives in the source failure domain's datacenter and
+	// resource pool so failure-domain matching finds it.
+	ms.Spec.Template.Spec.ProviderSpec.Value = &runtime.RawExtension{Raw: []byte(
+		`{"kind":"VSphereMachineProviderSpec","apiVersion":"machine.openshift.io/v1beta1","workspace":{"server":"source.example.com","datacenter":"dc-source","resourcePool":"rp-source-1"}}`)}
+	return ms
+}
+
+// assertMachineSetReplicas verifies the replicas of a MachineSet touched by
+// the rollout, treating nil (MAPI default 1) as a mismatch against want.
+func assertMachineSetReplicas(t *testing.T, ctx context.Context, reconciler *VmwareCloudFoundationMigrationReconciler, name string, want int32) {
+	t.Helper()
+	ms, err := reconciler.MachineClient.MachineV1beta1().MachineSets(openshift.MachineAPINamespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting machineset %q: %v", name, err)
+	}
+	if ms.Spec.Replicas == nil || *ms.Spec.Replicas != want {
+		t.Fatalf("machineset %q replicas = %v, want %d", name, ms.Spec.Replicas, want)
+	}
+}
+
+// newNilReplicaSourceMachineSetForRollout builds a source MachineSet with no
+// spec.replicas, which MAPI defaults to 1.
+func newNilReplicaSourceMachineSetForRollout(name string) *machinev1beta1.MachineSet {
+	ms := newSourceMachineSetForRolloutNamed(name, 1)
+	ms.Spec.Replicas = nil
+	return ms
 }
 
 func newTargetMachineSetForRollout(name, server string, replicas int32) *machinev1beta1.MachineSet {
@@ -1111,5 +1498,93 @@ func TestOldWorkerStallDetailSorting(t *testing.T) {
 	wantKey := "worker-a=worker-a-machine-1|worker-z=worker-z-machine-1,worker-z-machine-2"
 	if key != wantKey {
 		t.Fatalf("key = %q, want %q", key, wantKey)
+	}
+}
+
+// TestScaleDownFailsClosedWhenRecoveredNamesCannotPersist covers the restart
+// path where recovered destination MachineSet names must be durably published
+// before any source MachineSet is scaled down: a failing status write must
+// stop the migration with the source capacity untouched.
+func TestScaleDownFailsClosedWhenRecoveredNamesCannotPersist(t *testing.T) {
+	ctx := context.Background()
+	targetMSName := workerMachineSetName("test-infra", "target-fd-1")
+
+	reconciler := newRolloutReconciler(t, []runtime.Object{
+		newInfrastructureForRollout(),
+		newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+		newCPMSUpdatedForRollout([]string{"target-fd-1"}, true),
+		newSourceMachineSetForRollout(1),
+	})
+
+	start := metav1.Now()
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       migrationv1alpha1.SingletonName,
+			Namespace:  migrationv1alpha1.SingletonNamespace,
+			Generation: 1,
+		},
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+				Name:   "target-fd-1",
+				Server: "target.example.com",
+				Topology: configv1.VSpherePlatformTopology{
+					Template:       "/dc1/vm/target-template",
+					Datacenter:     "dc1",
+					Datastore:      "ds1",
+					ResourcePool:   "rp1",
+					ComputeCluster: "cl1",
+				},
+			}},
+		},
+		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+			StartTime: &start,
+			FailureDomainMappings: []migrationv1alpha1.FailureDomainMapping{
+				{Source: "source-fd-1", Destination: "target-fd-1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("building scheme: %v", err)
+	}
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(migration).
+		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ ...client.SubResourceUpdateOption) error {
+				return apierrors.NewServerTimeout(schema.GroupResource{Group: "migration.openshift.io", Resource: "vmwarecloudfoundationmigrations"}, "update", 1)
+			},
+		}).
+		Build()
+	reconciler.Client = fakeClient
+	reconciler.Scheme = scheme
+
+	machineMgr := openshift.NewMachineManager(reconciler.KubeClient, reconciler.MachineClient, reconciler.DynamicClient)
+	infraMgr := openshift.NewInfrastructureManager(reconciler.ConfigClient)
+	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	if err != nil {
+		t.Fatalf("getting source vCenter: %v", err)
+	}
+	oldMachineSets, err := machineMgr.GetMachineSetsByVCenter(ctx, sourceVC.Server)
+	if err != nil {
+		t.Fatalf("listing source MachineSets: %v", err)
+	}
+
+	_, err = reconciler.scaleDownSourceMachineSets(ctx, migration, machineMgr, infraMgr, oldMachineSets, sourceVC, "test-infra")
+	if err == nil {
+		t.Fatal("scaleDownSourceMachineSets succeeded, want error when recovered names cannot be persisted")
+	}
+	if !strings.Contains(err.Error(), "persisting recovered destination MachineSet names before scale-down") {
+		t.Fatalf("scaleDownSourceMachineSets error = %v, want containing %q", err, "persisting recovered destination MachineSet names before scale-down")
+	}
+
+	ms, err := reconciler.MachineClient.MachineV1beta1().MachineSets(openshift.MachineAPINamespace).Get(ctx, "source-worker-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting source machineset: %v", err)
+	}
+	if ms.Spec.Replicas == nil || *ms.Spec.Replicas != 1 {
+		t.Fatalf("source machineset replicas = %v, want 1 (must not scale down before persistence succeeds)", ms.Spec.Replicas)
 	}
 }
