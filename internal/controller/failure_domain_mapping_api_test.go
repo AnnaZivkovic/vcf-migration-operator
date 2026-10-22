@@ -31,21 +31,25 @@ import (
 // (dst-a, dst-b) and raw failureDomainMappings expressed at the wire level, so
 // schema markers (MinItems, listMapKey, XValidation) are exercised even for
 // values Go's omitempty would drop. A nil mappings argument omits the key.
-func newMappingResource(generateName string, mappings []interface{}) *unstructured.Unstructured {
+func newMappingResource(generateName string, mappings []interface{}, singleFD bool) *unstructured.Unstructured {
+	fds := []configv1.VSpherePlatformFailureDomainSpec{
+		{
+			Name: "dst-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
+			Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+		},
+		{
+			Name: "dst-b", Region: "region-b", Zone: "zone-b", Server: "vcenter.example.com",
+			Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-b"},
+		},
+	}
+	if singleFD {
+		fds = fds[:1]
+	}
 	resource := &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: generateName, Namespace: "default"},
 		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 			TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{Name: "target-vcenter-creds"},
-			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
-				{
-					Name: "dst-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
-					Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
-				},
-				{
-					Name: "dst-b", Region: "region-b", Zone: "zone-b", Server: "vcenter.example.com",
-					Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-b"},
-				},
-			},
+			FailureDomains:                 fds,
 		},
 	}
 	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
@@ -61,8 +65,8 @@ func newMappingResource(generateName string, mappings []interface{}) *unstructur
 
 var _ = Describe("failure domain mapping spec validation", func() {
 	DescribeTable("creation is validated against mapping schema markers",
-		func(generateName string, mappings []interface{}, wantErr string) {
-			resource := newMappingResource(generateName, mappings)
+		func(generateName string, mappings []interface{}, singleFD bool, wantErr string) {
+			resource := newMappingResource(generateName, mappings, singleFD)
 			if wantErr == "" {
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 				DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
@@ -74,20 +78,26 @@ var _ = Describe("failure domain mapping spec validation", func() {
 			"duplicate-destinations-", []interface{}{
 				map[string]interface{}{"source": "src-a", "destination": "dst-a"},
 				map[string]interface{}{"source": "src-b", "destination": "dst-a"},
-			}, "destination must be unique"),
+			}, false, "destination must be unique"),
 		Entry("rejects an empty mappings list",
-			"empty-mappings-", []interface{}{}, "should have at least 1 items"),
+			"empty-mappings-", []interface{}{}, false, "should have at least 1 items"),
 		Entry("rejects duplicate source names",
 			"duplicate-sources-", []interface{}{
 				map[string]interface{}{"source": "src-a", "destination": "dst-a"},
 				map[string]interface{}{"source": "src-a", "destination": "dst-b"},
-			}, "Duplicate value"),
+			}, false, "Duplicate value"),
+		Entry("rejects a destination that matches no failure domain",
+			"unknown-destination-", []interface{}{
+				map[string]interface{}{"source": "src-a", "destination": "dst-c"},
+			}, false, "every failureDomainMappings.destination must match"),
+		Entry("rejects omission of mappings with multiple failure domains",
+			"omitted-mappings-multi-fd-", nil, false, "failureDomainMappings is required when more than one failureDomain is defined"),
+		Entry("accepts omission of mappings with a single failure domain",
+			"omitted-mappings-single-fd-", nil, true, ""),
 		Entry("accepts a valid mapping list",
 			"valid-mappings-", []interface{}{
 				map[string]interface{}{"source": "src-a", "destination": "dst-a"},
 				map[string]interface{}{"source": "src-b", "destination": "dst-b"},
-			}, ""),
-		Entry("accepts omission of the field",
-			"omitted-mappings-", nil, ""),
+			}, false, ""),
 	)
 })

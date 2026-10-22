@@ -63,7 +63,8 @@ spec:
                   failureDomainMappings maps source failure domains to destination failure domains by name.
                   When omitted, exactly one source failure domain and one destination failure domain must exist, and they are mapped to each other implicitly.
                   When used, must contain between 1 and 64 items.
-                  Each destination must be unique.
+                  Each source and each destination must be unique; duplicate sources are also
+                  rejected by the list's map semantics.
                 items:
                   description: FailureDomainMapping maps one source failure domain
                     to one destination failure domain.
@@ -98,7 +99,7 @@ spec:
                 x-kubernetes-list-type: map
                 x-kubernetes-validations:
                 - message: destination must be unique across mappings
-                  rule: self.map(m, m.destination).distinct().size() == self.size()
+                  rule: self.all(m, self.exists_one(n, n.destination == m.destination))
               failureDomains:
                 description: |-
                   failureDomains defines failure domains for the target vCenter. The embedded
@@ -310,6 +311,7 @@ spec:
                   - topology
                   - zone
                   type: object
+                maxItems: 64
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
@@ -350,6 +352,14 @@ spec:
             - failureDomains
             - targetVCenterCredentialsSecret
             type: object
+            x-kubernetes-validations:
+            - message: failureDomainMappings is required when more than one failureDomain
+                is defined
+              rule: has(self.failureDomainMappings) || size(self.failureDomains) ==
+                1
+            - message: every failureDomainMappings.destination must match a failureDomains[].name
+              rule: '!has(self.failureDomainMappings) || self.failureDomainMappings.all(m,
+                m.destination in self.failureDomains.map(fd, fd.name))'
           status:
             description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
@@ -443,7 +453,8 @@ spec:
                 description: |-
                   failureDomainMappings is the effective source-to-destination failure domain
                   mapping resolved at preflight. When spec.failureDomainMappings is omitted it
-                  holds the single inferred pair. Immutable once set.
+                  holds the single inferred pair. The controller treats this field as
+                  write-once: after preflight resolves the mappings it does not rewrite them.
                 items:
                   description: FailureDomainMapping maps one source failure domain
                     to one destination failure domain.

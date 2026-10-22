@@ -135,6 +135,8 @@ type FailureDomainMapping struct {
 }
 
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
+// +kubebuilder:validation:XValidation:rule="has(self.failureDomainMappings) || size(self.failureDomains) == 1",message="failureDomainMappings is required when more than one failureDomain is defined"
+// +kubebuilder:validation:XValidation:rule="!has(self.failureDomainMappings) || self.failureDomainMappings.all(m, m.destination in self.failureDomains.map(fd, fd.name))",message="every failureDomainMappings.destination must match a failureDomains[].name"
 type VmwareCloudFoundationMigrationSpec struct {
 	// state controls the workflow: Pending, Running, Paused.
 	// The migration workflow only executes when state is Running.
@@ -156,6 +158,7 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// dependency bumps.
 	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:XValidation:rule="self.all(fd, has(fd.topology.template) && fd.topology.template != '')",message="topology.template is required for every failure domain"
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
@@ -163,13 +166,14 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// failureDomainMappings maps source failure domains to destination failure domains by name.
 	// When omitted, exactly one source failure domain and one destination failure domain must exist, and they are mapped to each other implicitly.
 	// When used, must contain between 1 and 64 items.
-	// Each destination must be unique.
+	// Each source and each destination must be unique; duplicate sources are also
+	// rejected by the list's map semantics.
 	// +optional
 	// +listType=map
 	// +listMapKey=source
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.map(m, m.destination).distinct().size() == self.size()",message="destination must be unique across mappings"
+	// +kubebuilder:validation:XValidation:rule="self.all(m, self.exists_one(n, n.destination == m.destination))",message="destination must be unique across mappings"
 	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
 }
 
@@ -199,7 +203,8 @@ type VmwareCloudFoundationMigrationStatus struct {
 
 	// failureDomainMappings is the effective source-to-destination failure domain
 	// mapping resolved at preflight. When spec.failureDomainMappings is omitted it
-	// holds the single inferred pair. Immutable once set.
+	// holds the single inferred pair. The controller treats this field as
+	// write-once: after preflight resolves the mappings it does not rewrite them.
 	// +optional
 	// +listType=atomic
 	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
