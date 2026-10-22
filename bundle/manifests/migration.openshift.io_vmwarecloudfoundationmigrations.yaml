@@ -60,14 +60,10 @@ spec:
             properties:
               failureDomainMappings:
                 description: |-
-                  failureDomainMappings maps source failure domains to destination failure
-                  domains by name.
-
-                  When omitted, exactly one source failure domain and one destination
-                  failure domain must exist, and they are mapped to each other implicitly.
-
-                  Minimum items: 1.
-                  Maximum items: 64.
+                  failureDomainMappings maps source failure domains to destination failure domains by name.
+                  When omitted, exactly one source failure domain and one destination failure domain must exist, and they are mapped to each other implicitly.
+                  When used, must contain between 1 and 64 items.
+                  Each destination must be unique.
                 items:
                   description: FailureDomainMapping maps one source failure domain
                     to one destination failure domain.
@@ -76,6 +72,8 @@ spec:
                       description: |-
                         destination is the name of the entry in spec.failureDomains that receives
                         the workloads migrated from source.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
                       maxLength: 256
                       minLength: 1
                       type: string
@@ -83,6 +81,8 @@ spec:
                       description: |-
                         source is the name of the failure domain in the cluster's Infrastructure
                         resource that this entry migrates workloads from.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
                       maxLength: 256
                       minLength: 1
                       type: string
@@ -452,6 +452,8 @@ spec:
                       description: |-
                         destination is the name of the entry in spec.failureDomains that receives
                         the workloads migrated from source.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
                       maxLength: 256
                       minLength: 1
                       type: string
@@ -459,6 +461,8 @@ spec:
                       description: |-
                         source is the name of the failure domain in the cluster's Infrastructure
                         resource that this entry migrates workloads from.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
                       maxLength: 256
                       minLength: 1
                       type: string

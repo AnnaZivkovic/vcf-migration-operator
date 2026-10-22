@@ -117,6 +117,8 @@ type SecretReference struct {
 type FailureDomainMapping struct {
 	// source is the name of the failure domain in the cluster's Infrastructure
 	// resource that this entry migrates workloads from.
+	// This field is required and must be a non-empty string.
+	// Must be between 1 and 256 characters in length.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
@@ -124,6 +126,8 @@ type FailureDomainMapping struct {
 
 	// destination is the name of the entry in spec.failureDomains that receives
 	// the workloads migrated from source.
+	// This field is required and must be a non-empty string.
+	// Must be between 1 and 256 characters in length.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
@@ -156,14 +160,10 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
 
-	// failureDomainMappings maps source failure domains to destination failure
-	// domains by name.
-	//
-	// When omitted, exactly one source failure domain and one destination
-	// failure domain must exist, and they are mapped to each other implicitly.
-	//
-	// Minimum items: 1.
-	// Maximum items: 64.
+	// failureDomainMappings maps source failure domains to destination failure domains by name.
+	// When omitted, exactly one source failure domain and one destination failure domain must exist, and they are mapped to each other implicitly.
+	// When used, must contain between 1 and 64 items.
+	// Each destination must be unique.
 	// +optional
 	// +listType=map
 	// +listMapKey=source
