@@ -13,6 +13,7 @@
 | `state` | `MigrationState` | No | `Pending` | `Pending`, `Running`, or `Paused`. Reconciler only acts when `Running`. |
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
 | `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
+| `failureDomainMappings` | `[]FailureDomainMapping` | No | | Maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once. |
 
 ### MigrationState Enum
 
@@ -30,6 +31,13 @@
 | `namespace` | `string` | No | Secret namespace (defaults to migration namespace) |
 
 The secret must contain keys in the format `<vcenter-fqdn>.username` and `<vcenter-fqdn>.password`.
+
+### FailureDomainMapping
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `source` | `string` | Yes | Source failure domain name, from the cluster's `Infrastructure` resource |
+| `destination` | `string` | Yes | Destination failure domain name, matching an entry in `spec.failureDomains` |
 
 ## Singleton Enforcement
 
