@@ -204,12 +204,22 @@ var _ = Describe("NodeMigration API validation", func() {
 		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
 	})
 
-	DescribeTable("accepts same-mode VMotion without a template",
+	DescribeTable("accepts same-mode VMotion with a template",
+		func(mode VMotionMode) {
+			resource := baseResource(uniqueName())
+			resource.Spec.NodeMigration = vmotionConfig(mode)
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		},
+		Entry("Hot", VMotionModeHot),
+		Entry("Cold", VMotionModeCold),
+	)
+
+	DescribeTable("rejects VMotion without a template",
 		func(mode VMotionMode) {
 			resource := baseResource(uniqueName())
 			resource.Spec.NodeMigration = vmotionConfig(mode)
 			withoutTemplate(resource)
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
 		},
 		Entry("Hot", VMotionModeHot),
 		Entry("Cold", VMotionModeCold),

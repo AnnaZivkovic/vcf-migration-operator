@@ -129,7 +129,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | `topology.networks` | `[]string` | Yes (min 1) | Port group network names |
 | `topology.resourcePool` | `string` | No | Path: `/<dc>/host/<cluster>/Resources/<pool>` |
 | `topology.folder` | `string` | No | Path: `/<dc>/vm/<folder>` |
-| `topology.template` | `string` | Conditional | Existing VM/template inventory path on the target vCenter; required for legacy and Recreate configurations, not VMotion |
+| `topology.template` | `string` | Yes | Existing VM/template inventory path on the target vCenter; required for every failure domain in this release, including VMotion |
 
 ## Status
 

@@ -288,7 +288,7 @@ Recovery acknowledgement and deletion handoff do not independently authorize cle
 ### API, ownership and legacy compatibility
 
 - Omitted selection retains legacy recreation behavior, including its probe/template handling. Explicit UPI VMotion never creates replacement node VMs or drives MachineSet/CPMS lifecycle changes.
-- UPI admission does not require a probe/template/DHCP/static-probe option; no arbitrary IPv4-only check or network-family conversion.
+- UPI execution does not consume a probe template/DHCP/static-probe option; current API admission still requires `topology.template` on every failure domain for this release. No arbitrary IPv4-only check or network-family conversion.
 - Only canonical namespace/name can execute; a competing CR cannot produce a second mutating workflow.
 - Round-trip all bounded action/status fields; pause-generation changes preserve matching action observations; stale writers cannot overwrite terminal/newer action state.
 

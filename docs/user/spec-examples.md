@@ -3,7 +3,7 @@
 The `VmwareCloudFoundationMigration` spec requires:
 
 - `targetVCenterCredentialsSecret` — references a secret with keys `<vcenter-fqdn>.username` and `<vcenter-fqdn>.password`.
-- `failureDomains`: one or more target failure domains (uses the OpenShift `configv1` `VSpherePlatformFailureDomainSpec` type). Legacy and Recreate selections require `topology.template`. VMotion uses exactly one target failure domain and does not require a template.
+- `failureDomains`: one or more target failure domains (uses the OpenShift `configv1` `VSpherePlatformFailureDomainSpec` type). Every failure domain requires `topology.template` for this release, including VMotion selections.
 
 `state` is optional (defaults to `Pending`; set to `Running` to start the migration).
 See the full field reference in the [API reference](../dev/api.md).
@@ -103,8 +103,9 @@ Tag reuse on previously-used hardware: if the target datacenter already has any 
 > See the [first-release design](../plans/upi-cross-vcenter-vmotion-design.md).
 
 Both roles must use the same explicit mode. `Auto`, omitted mode, mixed modes,
-and mixed VMotion/Recreate roles are rejected. VMotion requires one failure
-domain and does not require a template:
+and mixed VMotion/Recreate roles are rejected. VMotion uses the effective
+failure-domain mapping; `topology.template` is still required by the current
+API release, although the relocation operation does not consume it:
 
 ```yaml
 nodeMigration:
@@ -123,7 +124,7 @@ nodeMigration:
 For a Cold API shape, set both `vmotion.mode` fields to `Cold`. The API shape
 does not itself authorize shutdown, relocation, power-on, recovery, or replay.
 `maxUnavailable` is an integer; VMotion worker availability is limited to one.
-No `topology.template` is needed for VMotion.
+`topology.template` remains required for VMotion in this release.
 
 ## IPI Cluster (Recreate)
 
@@ -166,6 +167,6 @@ spec:
         folder: /TargetDC/vm/my-cluster-infra-id
 ```
 
-`topology.template` is required for legacy and Recreate configurations because
-new VMs are cloned from this template. Worker `maxUnavailable` values above
-one remain valid for Recreate.
+`topology.template` is required for every engine in this release. Legacy and
+Recreate paths clone new VMs from this template. Worker `maxUnavailable` values
+above one remain valid for Recreate.

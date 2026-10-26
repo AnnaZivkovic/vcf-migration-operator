@@ -66,7 +66,7 @@ PR 1 and PR #219 both change API types and generated CRD/bundle artifacts. Coord
 
 - [x] Remove VMotion-only failure-domain-count validation and the single-target `FrozenPlan.TargetFailureDomain` assumption. Consume the effective mapping in `status.failureDomainMappings`; keep the mapping owned by shared pre-processing and preserve each selected target FD/host/pool/datastore/network on its per-node record.
 - [ ] Check the rest of the API contract against design §2 and gate G1: defaults/immutability, bounded status, recovery acknowledgement, and status merge semantics. Do not describe API fields as shipped until the PR is merged.
-- [x] Verify omitted selection and Recreate still require/use the legacy template behavior, while VMotion does not require a template.
+- [x] Verify every selection requires a target failure-domain template for this release; VMotion does not consume it during relocation.
 - [x] Run API/envtest cases for legacy, Recreate, explicit Hot/Cold VMotion, invalid mode combinations, VMotion with the FD sets accepted by pre-processing, and bounded action/status round-trip; verify mapping fields are not duplicated and regenerate manifests/bundle artifacts.
 
 **Merge gate:** The schema permits exactly the design-supported input space, including the agreed failure-domain policy; generated CRDs/bundle match Go types.

@@ -43,11 +43,12 @@ unsupported.
 VMotion limits worker `maxUnavailable` to `1` and consumes the effective
 source-to-destination mapping resolved during preflight; it adds no single-FD or
 one-to-one mapping restriction of its own. Each planned node must resolve to one
-target FD or execution is blocked. A VMotion failure domain does not require
-`topology.template`. Legacy and Recreate configurations continue to require
-templates, and Recreate worker availability may exceed one. `maxUnavailable`
-is an integer node count from 1 through 32767 (default 1); percent strings are
-invalid.
+target FD or execution is blocked. Every destination failure domain must include
+an existing `topology.template` path for this release, including VMotion
+configurations. VMotion relocates existing VMs and does not consume the template
+during relocation. Recreate worker availability may exceed one.
+`maxUnavailable` is an integer node count from 1 through 32767 (default 1);
+percent strings are invalid.
 
 The `vmotion` block is required for VMotion and forbidden for Recreate. Mixed
 VMotion/Recreate role selections and mixed Hot/Cold modes are rejected by
@@ -97,7 +98,7 @@ nodeMigration:
 ### Hot and Cold API selections
 
 For VMotion, choose one explicit mode and use it for both roles. The target
-failure domain can omit `topology.template`.
+failure domain must include `topology.template`, as required for all engines.
 
 Hot selection:
 

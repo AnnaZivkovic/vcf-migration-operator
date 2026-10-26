@@ -137,7 +137,6 @@ type FailureDomainMapping struct {
 
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
 // +kubebuilder:validation:XValidation:rule="!has(self.failureDomainMappings) || self.failureDomainMappings.all(m, m.destination in self.failureDomains.map(fd, fd.name))",message="every failureDomainMappings.destination must match a failureDomains[].name"
-// +kubebuilder:validation:XValidation:rule="(has(self.nodeMigration) && self.nodeMigration.workers.type == 'VMotion' && self.nodeMigration.controlPlane.type == 'VMotion') || self.failureDomains.all(fd, has(fd.topology.template) && size(fd.topology.template) > 0)",message="topology.template is required for legacy and Recreate configurations"
 type VmwareCloudFoundationMigrationSpec struct {
 	// state controls the workflow: Pending, Running, Paused.
 	// The migration workflow only executes when state is Running.
@@ -160,6 +159,7 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(fd, has(fd.topology.template) && fd.topology.template != '')",message="topology.template is required for every failure domain"
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
 

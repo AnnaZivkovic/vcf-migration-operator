@@ -315,6 +315,10 @@ spec:
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: topology.template is required for every failure domain
+                  rule: self.all(fd, has(fd.topology.template) && fd.topology.template
+                    != '')
               nodeMigration:
                 description: |-
                   nodeMigration controls how nodes move to the target vCenter.
@@ -502,11 +506,6 @@ spec:
             - message: every failureDomainMappings.destination must match a failureDomains[].name
               rule: '!has(self.failureDomainMappings) || self.failureDomainMappings.all(m,
                 m.destination in self.failureDomains.map(fd, fd.name))'
-            - message: topology.template is required for legacy and Recreate configurations
-              rule: (has(self.nodeMigration) && self.nodeMigration.workers.type ==
-                'VMotion' && self.nodeMigration.controlPlane.type == 'VMotion') ||
-                self.failureDomains.all(fd, has(fd.topology.template) && size(fd.topology.template)
-                > 0)
           status:
             description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
