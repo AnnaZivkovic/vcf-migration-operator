@@ -74,6 +74,10 @@ var _ = Describe("NodeMigration API validation", func() {
 		fd.Name = "target-fd-2"
 		fd.Zone = "target-zone-2"
 		resource.Spec.FailureDomains = append(resource.Spec.FailureDomains, fd)
+		resource.Spec.FailureDomainMappings = []FailureDomainMapping{
+			{Source: "source-fd-1", Destination: resource.Spec.FailureDomains[0].Name},
+			{Source: "source-fd-2", Destination: fd.Name},
+		}
 	}
 
 	uniqueName := func() string {

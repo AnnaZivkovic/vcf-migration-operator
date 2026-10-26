@@ -160,7 +160,6 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(fd, has(fd.topology.template) && fd.topology.template != '')",message="topology.template is required for every failure domain"
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
 

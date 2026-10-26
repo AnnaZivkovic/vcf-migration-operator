@@ -315,10 +315,6 @@ spec:
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
-                x-kubernetes-validations:
-                - message: topology.template is required for every failure domain
-                  rule: self.all(fd, has(fd.topology.template) && fd.topology.template
-                    != '')
               nodeMigration:
                 description: |-
                   nodeMigration controls how nodes move to the target vCenter.
