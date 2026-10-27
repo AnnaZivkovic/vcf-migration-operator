@@ -14,6 +14,7 @@
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
 | `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
 | `failureDomainMappings` | `[]FailureDomainMapping` | No | | Maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once. |
+| `nodeMigration` | `NodeMigrationSpec` | No | | Selects Recreate or the VMotion API shape. When omitted, retains MachineSet/CPMS replacement. VMotion requires both roles, explicit matching Hot/Cold modes, and serial worker availability. API shape does not mean controller execution is implemented. See [Node Migration API](node-migration-api.md). |
 
 ### MigrationState Enum
 
@@ -128,7 +129,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | `topology.networks` | `[]string` | Yes (min 1) | Port group network names |
 | `topology.resourcePool` | `string` | No | Path: `/<dc>/host/<cluster>/Resources/<pool>` |
 | `topology.folder` | `string` | No | Path: `/<dc>/vm/<folder>` |
-| `topology.template` | `string` | Yes | Existing VM/template inventory path on the target vCenter; required for every failure domain at admission and verified during preflight |
+| `topology.template` | `string` | Yes | Existing VM/template inventory path on the target vCenter; required for every failure domain in this release, including VMotion |
 
 ## Status
 
@@ -139,6 +140,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | `workerMachineSetNames` | `[]string` | Append-only inventory of destination worker MachineSet names (max 256), used to require the replacements after the source MachineSets are deleted |
 | `startTime` | `*metav1.Time` | When migration entered `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
+| `nodeMigration` | `NodeMigrationStatus` | Per-node move progress. Nil when using MachineSet/CPMS replacement. |
 
 ### Condition Types (in order)
 
