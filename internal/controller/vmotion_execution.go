@@ -104,6 +104,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) submitVMotionAction(ctx conte
 		if node == nil || node.NodeUID == "" || node.VMBIOSUUID == "" {
 			return false, fmt.Errorf("claiming VMotion action: node identity is not frozen")
 		}
+		if _, err := targetVMotionPlacement(latest, node); err != nil {
+			return false, err
+		}
 		previous := vmotionOutcome(node, kind)
 		if previous == nil {
 			return false, fmt.Errorf("claiming VMotion action: unsupported kind %q", kind)
@@ -185,13 +188,11 @@ func callVMotionMutation(ctx context.Context, m *migrationv1alpha1.VmwareCloudFo
 }
 
 func targetVMotionPlacement(m *migrationv1alpha1.VmwareCloudFoundationMigration, n *migrationv1alpha1.NodeMigrationProgress) (vsphere.VMotionPlacement, error) {
-	for _, fd := range m.Spec.FailureDomains {
-		if fd.Name == n.TargetFailureDomain && sameVMotionVCenter(fd.Server, m.Status.NodeMigration.FrozenPlan.DestinationVCenter) && fd.Topology.Datacenter != "" {
-			return vsphere.VMotionPlacement{VCenter: m.Status.NodeMigration.FrozenPlan.DestinationVCenter, Datacenter: fd.Topology.Datacenter,
-				FailureDomain: n.TargetFailureDomain, ResourcePool: n.TargetResourcePool, Datastore: n.TargetDatastore, Network: n.TargetNetwork}, nil
-		}
+	if n.TargetDatacenter == "" {
+		return vsphere.VMotionPlacement{}, fmt.Errorf("resolving frozen VMotion destination for node %q: target datacenter is not recorded", n.Name)
 	}
-	return vsphere.VMotionPlacement{}, fmt.Errorf("resolving frozen VMotion destination: target failure domain is missing")
+	return vsphere.VMotionPlacement{VCenter: m.Status.NodeMigration.FrozenPlan.DestinationVCenter, Datacenter: n.TargetDatacenter,
+		FailureDomain: n.TargetFailureDomain, ResourcePool: n.TargetResourcePool, Datastore: n.TargetDatastore, Network: n.TargetNetwork}, nil
 }
 
 func sameVMotionAction(a, b *migrationv1alpha1.NodeMigrationAction) bool {

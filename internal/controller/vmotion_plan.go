@@ -561,7 +561,7 @@ func buildVMotionPlan(migration *migrationv1alpha1.VmwareCloudFoundationMigratio
 		progress := migrationv1alpha1.NodeMigrationProgress{
 			Name: identity.node.Name, State: migrationv1alpha1.NodeMigrationStatePending, RequestedMode: mode,
 			VMBIOSUUID: biosUUID, NodeUID: identity.node.UID, ProviderID: identity.node.Spec.ProviderID,
-			OriginalSchedulingState: schedulingState, TargetFailureDomain: destinationFD.Name,
+			OriginalSchedulingState: schedulingState, TargetFailureDomain: destinationFD.Name, TargetDatacenter: destinationFD.Topology.Datacenter,
 			TargetResourcePool: destinationFD.Topology.ResourcePool, TargetDatastore: destinationFD.Topology.Datastore,
 			TargetNetwork: destinationFD.Topology.Networks[0], SourceInventoryPath: vm.InventoryPath,
 		}
@@ -676,7 +676,7 @@ func sameFrozenNodeList(existing, candidate *migrationv1alpha1.RoleMigrationStat
 		a, b := &existing.Nodes[i], &candidate.Nodes[i]
 		if a.Name != b.Name || a.NodeUID != b.NodeUID || a.ProviderID != b.ProviderID || a.VMBIOSUUID != b.VMBIOSUUID ||
 			a.RequestedMode != b.RequestedMode || a.OriginalSchedulingState != b.OriginalSchedulingState ||
-			a.TargetFailureDomain != b.TargetFailureDomain || a.TargetResourcePool != b.TargetResourcePool ||
+			a.TargetFailureDomain != b.TargetFailureDomain || a.TargetDatacenter != b.TargetDatacenter || a.TargetResourcePool != b.TargetResourcePool ||
 			a.TargetDatastore != b.TargetDatastore || a.TargetNetwork != b.TargetNetwork || a.SourceInventoryPath != b.SourceInventoryPath {
 			return false
 		}
